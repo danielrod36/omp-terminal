@@ -626,7 +626,7 @@ function readAskFromPane(lines) {
 	// header (`<id>  Submit` above the question) — single-select dialogs have a
 	// one-line header holding only the question — so a question that merely
 	// mentions the word "Submit" cannot promote a single-select dialog.
-	const headerSubmit = box.header.length >= 2 && /\bSubmit\b/.test(box.header[0]);
+	const headerSubmit = box.header.length >= 2 && /\bSubmit\s*$/.test(box.header[0]);
 	const multi = /\btoggle\b/.test(box.help) || box.options.filter(option => option.checked).length > 1 || headerSubmit;
 	return {
 		kind: "question",
@@ -782,8 +782,13 @@ function resolveRequestedIndex(text, options) {
 		});
 	}
 	if (partials.length === 1) return partials[0];
-	// 3. A bare number token ("2", "two", "option 2"). Only a dictation that is
-	// otherwise just a number counts, so a numeric label reference cannot be
+	// An AMBIGUOUS label match must not fall through to the number path: the
+	// dictation named label text, so reinterpreting its digits as a row index would
+	// silently submit an option it never matched ("http 2" among `HTTP/2` and
+	// `HTTP/2 (restated)` must refuse, not Enter row 2). Refuse instead.
+	if (partials.length > 1) return -1;
+	// 3. A bare number token ("2", "two", "option 2"). Reached only when the
+	// dictation matched no label at all, so a numeric label reference cannot be
 	// mistaken for a row index.
 	const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
 	const numericTokens = tokens.filter(token => /^\d+$/.test(token) || token in words);

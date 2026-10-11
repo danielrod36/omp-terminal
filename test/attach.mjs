@@ -198,6 +198,15 @@ console.log("answer paths");
 		check(`multi "${dictation}" with pre-checked [${checked}] ends checked [${want}]`, result.answered && got === want, JSON.stringify({ got, want }));
 	}
 
+	// An ambiguous LABEL match must refuse rather than fall through to the number
+	// path, which would Enter a row the dictation never clearly named.
+	{
+		const ambiguous = await trial({ labels: ["HTTP/2", "HTTP/2 (restated)"], dictation: "http 2" });
+		check("ambiguous label match refuses instead of Entering a row", ambiguous.answered === false, JSON.stringify({ answered: ambiguous.answered, keys: ambiguous.sends }));
+		const unambiguous = await trial({ labels: ["HTTP/2", "HTTP/1.1"], dictation: "http 2" });
+		check("unambiguous label match still resolves", unambiguous.answered === true && unambiguous.pane.focus === 0);
+	}
+
 	for (const dictation of ["s", "zz", "nope"]) {
 		const result = await trial({ labels: ["Red", "Blue"], dictation });
 		check(`short/unknown "${dictation}" is refused`, result.answered === false && result.state !== "busy", JSON.stringify({ answered: result.answered, state: result.state }));
