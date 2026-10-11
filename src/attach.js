@@ -472,13 +472,14 @@ export class AttachSession {
  *
  * Two shapes are recognised, both verified live against omp 18.8.9:
  *  - an approval box headed `Allow tool: <name>` with an Approve/Deny list;
- *  - omp's `ask` dialog: a `╭─ Ask …` box whose body carries a question line
- *    and option rows prefixed by a radio (`\uf096`) or checkbox marker, each
- *    option row's focus marker (`\uf054`) identifying the highlighted row.
+ *  - omp's `ask` dialog: a `╭─ Ask …` box whose option rows render as
+ *    `<focus> <marker> <label>`, the focus marker (`\uf054`) identifying the
+ *    highlighted row.
  *
  * The numeric-row heuristic this replaces matched no real omp rendering: `ask`
- * paints a boxed list, and `select` dialogs are consumed by the RPC UI context,
- * so no dialog ever produced numbered option rows.
+ * paints a boxed list whose option marker is a private-use glyph, and `select`
+ * dialogs are consumed by the RPC UI context, so no dialog ever produced
+ * numbered option rows.
  */
 export function readDialogFromPane(pane) {
 	const lines = String(pane ?? "").split("\n");
