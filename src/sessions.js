@@ -16,7 +16,15 @@ const log = createLogger("sessions");
  * carrying `id` and `cwd`.
  */
 
-/** Encode a cwd the way omp's session buckets do. */
+/**
+ * Encode a cwd the way omp's session buckets do.
+ *
+ * Mirrors `getDefaultSessionDirName` in omp's `src/session/session-paths.ts`
+ * (verified against 18.8.9 artifacts): home-relative gets `-<rel>`, a cwd under
+ * the temp root gets `-tmp-<rel>`, and anything else keeps the legacy absolute
+ * form `--<abs with separators as dashes>--`. The trailing `--` matters: a
+ * bucket for `/var/tmp/proj` is `--var-tmp-proj--`, not `var-tmp-proj`.
+ */
 export function sessionDirName(cwd, { home, tmp = "/tmp" } = {}) {
 	const homeDir = home ?? process.env.HOME ?? "";
 	if (homeDir && (cwd === homeDir || cwd.startsWith(`${homeDir}/`))) {
@@ -25,7 +33,7 @@ export function sessionDirName(cwd, { home, tmp = "/tmp" } = {}) {
 	if (cwd === tmp || cwd.startsWith(`${tmp}/`)) {
 		return `-tmp-${cwd.slice(tmp.length).replace(/^\/+/, "").replace(/\//g, "-")}`;
 	}
-	return cwd.replace(/^\/+/, "").replace(/\//g, "-");
+	return `--${cwd.replace(/^\/+/, "").replace(/[/:]/g, "-")}--`;
 }
 
 /** Read at most `maxBytes` from a file without loading the whole transcript. */
@@ -186,6 +194,15 @@ export function listOmpSessions(config, { limit = 50 } = {}) {
 	return out.slice(0, limit);
 }
 
+/**
+ * Resolve a session id (or exact transcript path) to one transcript.
+ *
+ * Matching is deliberately strict: an exact session id, an exact file name, or
+ * an unambiguous id prefix (omp's own `--resume` semantics). A bare substring
+ * test — the previous behaviour — resolved arbitrary garbage like `"1"` to a
+ * timestamp containing that digit, so a typo resumed and exposed an unrelated
+ * transcript. Ambiguity resolves to null rather than guessing.
+ */
 export function findOmpSession(config, idOrPath) {
 	if (!idOrPath) return null;
 	if (idOrPath.endsWith(".jsonl") && existsSync(idOrPath)) {
@@ -194,6 +211,7 @@ export function findOmpSession(config, idOrPath) {
 	}
 	const root = config.sessionsRoot;
 	if (!existsSync(root)) return null;
+	let prefixMatch = null;
 	for (const dirName of readdirSync(root)) {
 		const dir = join(root, dirName);
 		let entries;
@@ -203,15 +221,28 @@ export function findOmpSession(config, idOrPath) {
 			continue;
 		}
 		for (const name of entries) {
-			if (!name.includes(idOrPath)) continue;
 			const file = join(dir, name);
-			const head = parseHead(file);
-			if (head.sessionId === idOrPath || name.includes(idOrPath)) {
-				return { ...head, path: file };
+			// Transcript names are `<timestamp>_<sessionId>.jsonl`; the id is the
+			// suffix after the last underscore, so an exact id can be checked from
+			// the file name alone.
+			const base = name.slice(0, -".jsonl".length);
+			const separator = base.lastIndexOf("_");
+			const namedId = separator >= 0 ? base.slice(separator + 1) : base;
+			if (namedId === idOrPath || name === idOrPath) {
+				const head = parseHead(file);
+				if (head.sessionId === idOrPath) return { ...head, path: file };
+				// The file name matched but the head disagrees (an odd/truncated
+				// transcript): fall through and keep scanning for a clean match.
+				if (!prefixMatch && head.sessionId && head.sessionId.startsWith(idOrPath)) prefixMatch = { ...head, path: file };
+				continue;
 			}
+			if (idOrPath.length < 6 || !namedId.startsWith(idOrPath)) continue;
+			// Prefix hits are only safe when exactly one transcript matches.
+			if (prefixMatch) return null;
+			prefixMatch = { ...parseHead(file), path: file };
 		}
 	}
-	return null;
+	return prefixMatch;
 }
 
 /**
