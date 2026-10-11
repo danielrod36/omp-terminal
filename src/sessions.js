@@ -38,11 +38,19 @@ export function sessionDirName(cwd, { home, tmp = "/tmp" } = {}) {
 
 /** Read at most `maxBytes` from a file without loading the whole transcript. */
 function readPrefix(file, maxBytes) {
-	const fd = openSync(file, "r");
+	let fd;
+	try {
+		fd = openSync(file, "r");
+	} catch {
+		// Rotated away between the listing and the read.
+		return "";
+	}
 	try {
 		const buffer = Buffer.allocUnsafe(maxBytes);
 		const read = readSync(fd, buffer, 0, maxBytes, 0);
 		return buffer.toString("utf8", 0, read);
+	} catch {
+		return "";
 	} finally {
 		closeSync(fd);
 	}
@@ -74,13 +82,25 @@ function parseHead(file, maxBytes = 64 * 1024) {
 }
 
 function tailLines(file, maxBytes = 256 * 1024) {
-	const size = statSync(file).size;
+	let size;
+	try {
+		size = statSync(file).size;
+	} catch {
+		return [];
+	}
 	const start = Math.max(0, size - maxBytes);
-	const fd = openSync(file, "r");
+	let fd;
+	try {
+		fd = openSync(file, "r");
+	} catch {
+		return [];
+	}
 	try {
 		const buffer = Buffer.allocUnsafe(size - start);
 		const read = readSync(fd, buffer, 0, buffer.length, start);
 		return buffer.toString("utf8", 0, read).split("\n").filter(Boolean);
+	} catch {
+		return [];
 	} finally {
 		closeSync(fd);
 	}
@@ -155,8 +175,14 @@ function firstUserText(file) {
 export function listOmpSessions(config, { limit = 50 } = {}) {
 	const root = config.sessionsRoot;
 	if (!existsSync(root)) return [];
+	let rootEntries;
+	try {
+		rootEntries = readdirSync(root);
+	} catch {
+		return [];
+	}
 	const out = [];
-	for (const dirName of readdirSync(root)) {
+	for (const dirName of rootEntries) {
 		const dir = join(root, dirName);
 		let entries;
 		try {
@@ -216,7 +242,13 @@ export function findOmpSession(config, idOrPath) {
 	const allowPrefix = idOrPath.length >= 6;
 	const prefixMatches = [];
 	let exactFallback = null;
-	for (const dirName of readdirSync(root)) {
+	let rootEntries;
+	try {
+		rootEntries = readdirSync(root);
+	} catch {
+		return null;
+	}
+	for (const dirName of rootEntries) {
 		const dir = join(root, dirName);
 		let entries;
 		try {
@@ -265,8 +297,18 @@ export function ompHistory(config, idOrPath, limit = 10) {
 	if (!found) return [];
 	const CHUNK = 256 * 1024;
 	const MAX_CHUNKS = 8; // 2 MiB ceiling
-	const size = statSync(found.path).size;
-	const fd = openSync(found.path, "r");
+	let size;
+	try {
+		size = statSync(found.path).size;
+	} catch {
+		return [];
+	}
+	let fd;
+	try {
+		fd = openSync(found.path, "r");
+	} catch {
+		return [];
+	}
 	const collected = [];
 	try {
 		let end = size;

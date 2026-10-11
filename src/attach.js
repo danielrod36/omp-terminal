@@ -64,7 +64,17 @@ export class AttachSession {
 				this.transcriptPath = null;
 			}
 		}
-		if (!this.transcriptPath) this.#resolveTranscript();
+		if (!this.transcriptPath) {
+			// Resolution itself walks the filesystem (readdir, stat, open); any of
+			// those can race a rotation. A throw here would escape before the timer
+			// below is installed, leaving a registered session that never polls, so
+			// it is contained — the first poll retries.
+			try {
+				this.#resolveTranscript();
+			} catch (error) {
+				log.warn(`attach ${this.id} transcript resolution failed: ${error.message}`);
+			}
+		}
 		this.timer = setInterval(() => this.#poll().catch(error => log.warn(`poll failed: ${error.message}`)), this.config.tailIntervalMs);
 		this.timer.unref?.();
 		return this;
@@ -799,8 +809,15 @@ export async function listTmuxOmpSessions(config) {
 function newestTranscript(config, cwd) {
 	const dir = `${config.sessionsRoot}/${sessionDirName(cwd)}`;
 	if (!existsSync(dir)) return null;
+	let names;
+	try {
+		names = readdirSync(dir);
+	} catch {
+		// The bucket can be removed or replaced between the check and the read.
+		return null;
+	}
 	let best = null;
-	for (const name of readdirSync(dir)) {
+	for (const name of names) {
 		if (!name.endsWith(".jsonl")) continue;
 		const path = `${dir}/${name}`;
 		try {
