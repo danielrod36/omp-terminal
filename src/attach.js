@@ -760,22 +760,25 @@ function resolveRequestedIndex(text, options) {
 	// 1. The dictation IS a label (including a label like "Option 2").
 	const byLabel = options.findIndex(option => option.label.toLowerCase() === lowered);
 	if (byLabel >= 0) return byLabel;
-	// 2. A label match on TOKENS, checked before any bare number: a dictation that
-	// names a digit-containing label ("http 2" for `HTTP/2`) must not be read as a
-	// row number and answer a different option. The dictation's tokens must form a
-	// prefix of the label's tokens.
+	// 2. A label match on TOKENS, checked before any bare number. The dictation's
+	// tokens must occur as a CONTIGUOUS RUN inside the label's tokens, anywhere:
+	// a version-style dictation ("1.1" for `HTTP/1.1`, "2" for `HTTP/2`) is a
+	// substring of the label, not a prefix of it. Checking this before the number
+	// path is what stops "http 2" from being read as row 2.
 	//
 	// The length gate applies only to a SINGLE short token: "s"/"ow" is a
 	// misrecognition and must not auto-submit, but a multi-token dictation
-	// ("ai agents", "os versions") is specific enough to match whatever the first
-	// token's length.
+	// ("ai agents", "osi model") is specific enough whatever the first token's
+	// length.
 	const specific = tokens.length >= 2 || (tokens[0]?.length ?? 0) >= 3;
 	const partials = [];
 	if (specific) {
 		options.forEach((option, index) => {
 			const labelTokens = option.label.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-			if (tokens.length > labelTokens.length) return;
-			if (tokens.every((token, position) => labelTokens[position].startsWith(token))) partials.push(index);
+			const hit = labelTokens.some((_, offset) =>
+				tokens.every((token, position) => labelTokens[offset + position]?.startsWith(token)),
+			);
+			if (hit) partials.push(index);
 		});
 	}
 	if (partials.length === 1) return partials[0];
