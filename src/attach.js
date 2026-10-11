@@ -698,12 +698,12 @@ function readAskBoxes(lines) {
 			const row = framed ? splitOptionRow(content) : null;
 			if (row && row.label && isMarker(row.marker)) candidates.push(row);
 		}
-		// Resolve the shared marker offset by majority, then keep only the rows that
-		// agree. A stray framed row (a wrapped question line, a note) sits at a
-		// different offset; taking the modal offset means the real option rows win
-		// even when the stray one comes first, and the stray row is dropped instead of
-		// shifting focusRow — which would make navigation toggle a different physical
-		// row than the one dictated.
+		// Prefer rows at the block's shared marker offset, but never let alignment
+		// decide whether the dialog exists: a render that puts the focused row's
+		// marker one column off (the leading padding is terminal-width dependent)
+		// would otherwise drop the focused row, leave focusRow at -1, and make the
+		// whole live dialog invisible and unanswerable. Alignment is a tiebreaker
+		// only — when no clear majority agrees, every candidate is kept.
 		const offsets = new Map();
 		for (const candidate of candidates) offsets.set(candidate.markerAt, (offsets.get(candidate.markerAt) ?? 0) + 1);
 		let modalAt = -1;
@@ -714,8 +714,15 @@ function readAskBoxes(lines) {
 				modalCount = count;
 			}
 		}
+		// A row carrying the focus glyph is an option by definition, so it is never
+		// trimmed — trimming it would leave focusRow at -1 and make the dialog
+		// unanswerable, which is precisely the case a terminal-width-dependent padding
+		// produces (the focused row one column off from the rest). Only unfocused rows
+		// are subject to the majority rule, and only when it is clear.
+		const runnerUp = [...offsets.entries()].filter(([offset]) => offset !== modalAt).reduce((max, [, count]) => Math.max(max, count), 0);
+		const trim = modalCount >= 2 && modalCount > runnerUp;
 		for (const row of candidates) {
-			if (row.markerAt !== modalAt) continue;
+			if (trim && !row.focus && row.markerAt !== modalAt) continue;
 			// The `Other (type your own)` row is the free-text affordance, not one of
 			// the offered options.
 			if (/^Other \(type your own\)$/.test(row.label)) continue;

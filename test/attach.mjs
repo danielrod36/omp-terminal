@@ -218,6 +218,30 @@ console.log("answer paths");
 		check("unambiguous label match still resolves", unambiguous.answered === true && unambiguous.pane.focus === 0);
 	}
 
+	// A render whose focused row sits one column off (leading padding is
+	// terminal-width dependent) must still yield a usable dialog: the focused row is
+	// never trimmed, or focusRow stays -1 and the dialog becomes unanswerable.
+	{
+		const splitPane = [
+			"╭─ Ask ─╮", "│ Which? │", "├────┤",
+			`│  ${FOCUS} ${MARK} Red │`,   // focused, shifted one column
+			`│   ${MARK} Green │`,
+			`│   ${MARK} Blue │`,
+			"│  │", "├────┤", "│ select · ↑/↓ │", "╰────╯",
+		].join("\n");
+		const parsed = readDialogFromPane(splitPane);
+		check("split marker offsets keep every row and the focus", parsed?.options.length === 3 && parsed.focusedIndex === 0, JSON.stringify(parsed && { o: parsed.options.map(x => x.label), f: parsed.focusedIndex }));
+		const strayPane = [
+			"╭─ Ask ─╮", "│ Which? │", "├────┤",
+			`│ \uf2c7 note │`,            // a note row inside the block
+			`│ ${FOCUS} ${MARK} Red │`,
+			`│   ${MARK} Green │`,
+			"│  │", "├────┤", "│ select · ↑/↓ │", "╰────╯",
+		].join("\n");
+		const strayParsed = readDialogFromPane(strayPane);
+		check("a stray icon row is dropped without shifting focus", JSON.stringify(strayParsed?.options.map(o => o.label)) === JSON.stringify(["Red", "Green"]) && strayParsed.focusedIndex === 0, JSON.stringify(strayParsed && { o: strayParsed.options.map(x => x.label), f: strayParsed.focusedIndex }));
+	}
+
 	for (const dictation of ["s", "zz", "nope"]) {
 		const result = await trial({ labels: ["Red", "Blue"], dictation });
 		check(`short/unknown "${dictation}" is refused`, result.answered === false && result.state !== "busy", JSON.stringify({ answered: result.answered, state: result.state }));
