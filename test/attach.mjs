@@ -80,7 +80,7 @@ console.log("dialog properties");
 		if (multi) lines.push(`│ ${headerIcon ? ICON + " " : ""}colour  Submit │`);
 		lines.push(`│ ${question} │`, "├──────┤");
 		labels.forEach((label, index) => {
-			const cursor = index === focus ? `${FOCUS} ` : "   ";
+			const cursor = index === focus ? `${FOCUS} ` : "  ";
 			const marker = checked.includes(index) ? CHECK : MARK;
 			lines.push(`│ ${cursor}${marker} ${label} │`);
 		});
@@ -144,7 +144,7 @@ console.log("answer paths");
 		if (multi) lines.push("│  q  Submit │");
 		lines.push("│ Which? │", "├──────┤");
 		labels.forEach((label, index) => {
-			const cursor = index === focus ? `${FOCUS} ` : "   ";
+			const cursor = index === focus ? `${FOCUS} ` : "  ";
 			const marker = checked.includes(index) ? CHECK : MARK;
 			lines.push(`│ ${cursor}${marker} ${label} │`);
 		});
@@ -196,6 +196,17 @@ console.log("answer paths");
 		const got = [...result.pane.checked].sort().join(",");
 		const want = [...wantChecked].sort().join(",");
 		check(`multi "${dictation}" with pre-checked [${checked}] ends checked [${want}]`, result.answered && got === want, JSON.stringify({ got, want }));
+	}
+
+	// A recommended option renders as `Yes (Recommended)`; the wearer dictates what
+	// they see, so the display suffix must not block the match.
+	{
+		const recommended = ["\u256d\u2500 Ask \u2500\u256e", "\u2502  tests    runner    Submit \u2502", "\u2502 Do you want tests? \u2502", "\u251c\u2500\u2500\u2500\u2504", `\u2502 ${FOCUS} ${MARK} Yes (Recommended) \u2502`, `\u2502   ${MARK} No \u2502`, `\u2502   ${MARK} Other (type your own) \u2502`, "\u2502  \u2502", "\u251c\u2500\u2500\u2500\u2504", "\u2502 select \u00b7 \u2190/\u2192 question \u00b7 \u2191/\u2193 \u2502", "\u2570\u2500\u2500\u2500\u256f"].join("\n");
+		const parsed = readDialogFromPane(recommended);
+		check("recommended suffix is kept in the label", parsed?.options[0]?.label === "Yes (Recommended)", JSON.stringify(parsed?.options.map(o => o.label)));
+		check("recommended suffix is not read as a multi signal alone", parsed?.multi === true, String(parsed?.multi));
+		const byVisible = await trial({ labels: ["Yes (Recommended)", "No"], dictation: "Yes" });
+		check('dictating the visible row "Yes" resolves', byVisible.answered === true && byVisible.pane.focus === 0, JSON.stringify({ answered: byVisible.answered, focus: byVisible.pane.focus }));
 	}
 
 	// An ambiguous LABEL match must refuse rather than fall through to the number

@@ -664,6 +664,12 @@ function readAskBoxes(lines) {
 		// "closed early" by one.
 		const box = { header: [], options: [], checked: new Set(), focusRow: -1, help: "", framedRows: 0 };
 		let rules = 0;
+		// The marker offset shared by the block's option rows. Every live capture
+		// puts the marker at one fixed offset regardless of focus, so a framed row
+		// whose marker sits elsewhere (a wrapped question line, a note row) is not
+		// an option. Without this a stray PUA-led row becomes a phantom option and
+		// shifts focusRow, so navigation toggles a different physical row.
+		const candidates = [];
 		for (let index = start + 1; index < lines.length; index++) {
 			const trimmed = lines[index].trim();
 			if (/^[╰└]/.test(trimmed)) break;
@@ -690,18 +696,35 @@ function readAskBoxes(lines) {
 			// Between the rules: the option rows. The row keeps its leading
 			// whitespace because the focus column is whitespace-delimited.
 			const row = framed ? splitOptionRow(content) : null;
-			if (row && row.label && isMarker(row.marker)) {
-				const label = row.label;
-				// The `Other (type your own)` row is the free-text affordance, not
-				// one of the offered options.
-				if (/^Other \(type your own\)$/.test(label)) continue;
-				// A checked row renders U+F14A where an unchecked one renders
-				// U+F096 (measured live: toggling a row with Space swaps those two).
-				const checkedMarker = row.marker === "\uf14a";
-				if (checkedMarker) box.checked.add(box.options.length);
-				if (row.focus) box.focusRow = box.options.length;
-				box.options.push({ label, checked: checkedMarker });
+			if (row && row.label && isMarker(row.marker)) candidates.push(row);
+		}
+		// Resolve the shared marker offset by majority, then keep only the rows that
+		// agree. A stray framed row (a wrapped question line, a note) sits at a
+		// different offset; taking the modal offset means the real option rows win
+		// even when the stray one comes first, and the stray row is dropped instead of
+		// shifting focusRow — which would make navigation toggle a different physical
+		// row than the one dictated.
+		const offsets = new Map();
+		for (const candidate of candidates) offsets.set(candidate.markerAt, (offsets.get(candidate.markerAt) ?? 0) + 1);
+		let modalAt = -1;
+		let modalCount = 0;
+		for (const [offset, count] of offsets) {
+			if (count > modalCount || (count === modalCount && offset < modalAt)) {
+				modalAt = offset;
+				modalCount = count;
 			}
+		}
+		for (const row of candidates) {
+			if (row.markerAt !== modalAt) continue;
+			// The `Other (type your own)` row is the free-text affordance, not one of
+			// the offered options.
+			if (/^Other \(type your own\)$/.test(row.label)) continue;
+			// A checked row renders U+F14A where an unchecked one renders U+F096
+			// (measured live: toggling a row with Space swaps those two).
+			const checkedMarker = row.marker === "\uf14a";
+			if (checkedMarker) box.checked.add(box.options.length);
+			if (row.focus) box.focusRow = box.options.length;
+			box.options.push({ label: row.label, checked: checkedMarker });
 		}
 		boxes.push(box);
 	}
@@ -725,7 +748,11 @@ function splitOptionRow(content) {
 	const focused = FOCUS.test(text[0]) ? text[0] : null;
 	const afterFocus = focused ? text.slice(1).replace(/^\s+/, "") : text;
 	if (!afterFocus) return null;
-	return { focus: focused, marker: afterFocus[0], label: afterFocus.slice(1).trim() };
+	// Offset of the marker within the row (before trimming): every real option row
+	// puts its marker at the same offset — measured across five live captures, the
+	// focus glyph occupies the column before it rather than displacing it.
+	const markerAt = content.length - afterFocus.length;
+	return { focus: focused, marker: afterFocus[0], label: afterFocus.slice(1).trim(), markerAt };
 }
 
 const FOCUS = /[\uf054\u276f\u25b6]/;
@@ -765,6 +792,12 @@ function resolveRequestedIndex(text, options) {
 	// a version-style dictation ("1.1" for `HTTP/1.1`, "2" for `HTTP/2`) is a
 	// substring of the label, not a prefix of it. Checking this before the number
 	// path is what stops "http 2" from being read as row 2.
+	//
+	// This run-matching is also what lets a wearer answer by what they SEE: omp
+	// renders a recommended option as `Yes (Recommended)`, and the tokenizer treats
+	// the parenthetical as separate tokens, so the dictation "yes" matches the
+	// `["yes", "recommended"]` run. The suffix is display chrome, never part of
+	// what the wearer says.
 	//
 	// The length gate applies only to a SINGLE short token: "s"/"ow" is a
 	// misrecognition and must not auto-submit, but a multi-token dictation
