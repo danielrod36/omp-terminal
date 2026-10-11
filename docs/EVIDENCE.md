@@ -61,7 +61,8 @@ omp v18.8.7, binary on `PATH`; source types from the packed npm tarball.
 | `Enter` approves | live: file written after `Enter` |
 | `ask` dialog box | live `capture-pane` (18.8.9): `╭─ Ask ─…`, question row, then option rows `\uf054 \uf10c <label>`; markers are private-use glyphs that vary by Nerd Font revision (`U+F096`, `U+F10C` observed) |
 | Option focus marker | `\uf054` on the highlighted row; a live `Down` moves it |
-| Multi vs single `ask` | the key-hint bar says `toggle` for multi-select and `select` for single; both render the same marker glyph when unchecked |
+| Multi vs single `ask` | the key-hint bar says `toggle` for multi-select and `select` for single; both render the same marker glyph when unchecked (verified through the bridge: `multiSelect: true` reaches the app frame and answering it lands "Blue selected" in the desk TUI) |
+| Checked row | toggling a row with `Space` swaps its marker `U+F096` → `U+F14A`; markers are private-use glyphs and the focus glyph is always `U+F054` |
 | Multi toggle | live: `Space` marks the row checked (`U+F14A`), `Enter` submits |
 | Transcript location | `<sessionsRoot>/<encoded-cwd>/*.jsonl`; `pane_current_path` -> encoded bucket |
 | Byte-exact rewind | transcript line offsets are bytes, not JS string indices; `#resumeOffset` scans the raw Buffer |
