@@ -65,6 +65,150 @@ console.log("pane scraping");
 	check("no dialog on plain output", readDialogFromPane(plain) === null);
 }
 
+// --- dialog shape and answer-path properties -----------------------------
+// These drive a modelled pane so the parser and the navigation are checked as a
+// unit: an option row's physical position, not just its text, decides which row
+// a dictated answer lands on.
+console.log("dialog properties");
+{
+	const FOCUS = "\uf054";
+	const MARK = "\uf10c";
+	const CHECK = "\uf14a";
+	const ICON = "\uf2c7";
+	const build = ({ labels, focus = 0, checked = [], multi = false, headerIcon = false, question = "Which?", hint = "select" }) => {
+		const lines = ["╭─ Ask ─╮"];
+		if (multi) lines.push(`│ ${headerIcon ? ICON + " " : ""}colour  Submit │`);
+		lines.push(`│ ${question} │`, "├──────┤");
+		labels.forEach((label, index) => {
+			const cursor = index === focus ? `${FOCUS} ` : "   ";
+			const marker = checked.includes(index) ? CHECK : MARK;
+			lines.push(`│ ${cursor}${marker} ${label} │`);
+		});
+		lines.push("│      │", "├──────┤");
+		if (hint !== null) lines.push(`│ ${hint} · ↑/↓ │`);
+		lines.push("╰──────╯");
+		return lines.join("\n");
+	};
+
+	// Valid dialogs must parse with the right options, focus, and mode.
+	for (const [name, opts, wantMulti] of [
+		["plain single-select", { labels: ["Red", "Blue"] }, false],
+		["multi with header", { labels: ["Red", "Blue"], multi: true }, true],
+		["multi, glyph-led header", { labels: ["Red", "Blue"], multi: true, headerIcon: true }, true],
+		["focus on the last row", { labels: ["A", "B", "C"], focus: 2 }, false],
+		["already-checked row", { labels: ["A", "B"], checked: [1], multi: true }, true],
+		["labels that begin with a glyph", { labels: ["● Low", "★ Star", "□ Box"] }, false],
+		["reworded hint bar", { labels: ["A", "B"], hint: "mark · confirm" }, false],
+		["no hint bar", { labels: ["A", "B"], hint: null }, false],
+		["question mentioning Submit", { labels: ["A", "B"], question: "Should I submit?" }, false],
+	]) {
+		const parsed = readDialogFromPane(build(opts));
+		check(`parses: ${name}`, parsed?.options.length === opts.labels.length && parsed.multi === wantMulti, JSON.stringify(parsed && { o: parsed.options.map(x => x.label), m: parsed.multi }));
+		if (opts.focus !== undefined && parsed) check(`focus row: ${name}`, parsed.focusedIndex === opts.focus, String(parsed.focusedIndex));
+		if (opts.checked) check(`checked rows: ${name}`, JSON.stringify(parsed?.checked) === JSON.stringify(opts.checked), JSON.stringify(parsed?.checked));
+	}
+
+	// A glyph-led header must never register as an option row.
+	{
+		const parsed = readDialogFromPane(build({ labels: ["Red", "Blue"], multi: true, headerIcon: true }));
+		check("glyph-led header adds no option", parsed?.options.length === 2, JSON.stringify(parsed?.options.map(o => o.label)));
+		check("glyph-led header is not the prompt", parsed?.prompt === "Which?", JSON.stringify(parsed?.prompt));
+	}
+
+	// The transcript echo left by a closed dialog is not a live dialog.
+	{
+		const echo = [
+			"╭─── Ask 1 questions ───╮",
+			"├─── [colour] · options:2 ───┤",
+			"│  Which?  │",
+			`│  ${MARK} Red │`,
+			`│  ${MARK} Blue │`,
+			"╰────╯",
+		].join("\n");
+		check("transcript echo is not a dialog", readDialogFromPane(echo) === null);
+		check("prose + numbered list is not a dialog", readDialogFromPane("Q?\n  1. a\n  2. b") === null);
+		check("plain output is not a dialog", readDialogFromPane("some\nordinary\noutput\n") === null);
+	}
+}
+
+// The answer paths move the pane's cursor, so the modelled pane mutates as keys
+// are sent and the assertions read the state the desk TUI would actually be in.
+console.log("answer paths");
+{
+	const FOCUS = "\uf054";
+	const MARK = "\uf10c";
+	const CHECK = "\uf14a";
+	const { AttachSession } = await import("../src/attach.js");
+	const render = (labels, focus, checked, multi) => {
+		const lines = ["╭─ Ask ─╮"];
+		if (multi) lines.push("│  q  Submit │");
+		lines.push("│ Which? │", "├──────┤");
+		labels.forEach((label, index) => {
+			const cursor = index === focus ? `${FOCUS} ` : "   ";
+			const marker = checked.includes(index) ? CHECK : MARK;
+			lines.push(`│ ${cursor}${marker} ${label} │`);
+		});
+		lines.push("│      │", "├──────┤", `│ ${multi ? "toggle · submit" : "select"} · ↑/↓ │`, "╰──────╯");
+		return lines.join("\n");
+	};
+
+	const trial = async ({ labels, focus = 0, checked = [], multi = false, dictation, sendFailsAt = Infinity }) => {
+		const pane = { labels: [...labels], focus, checked: [...checked] };
+		let sends = 0;
+		const session = new AttachSession({
+			id: "tmux:props",
+			tmuxSession: "props",
+			cwd: "/tmp",
+			provider: "p",
+			config: { sessionsRoot: "/tmp", tailIntervalMs: 500 },
+			transcriptPath: null,
+		});
+		session.capture = async () => render(pane.labels, pane.focus, pane.checked, multi);
+		session.send = async key => {
+			if (++sends > sendFailsAt) return false;
+			if (key === "Down") pane.focus = Math.min(pane.focus + 1, pane.labels.length - 1);
+			else if (key === "Up") pane.focus = Math.max(pane.focus - 1, 0);
+			else if (key === "Space") pane.checked = pane.checked.includes(pane.focus) ? pane.checked.filter(i => i !== pane.focus) : [...pane.checked, pane.focus];
+			return true;
+		};
+		const answered = await session.answerQuestion(dictation);
+		return { answered, pane, sends, state: session.state };
+	};
+
+	for (const [dictation, labels, focus, wantIndex] of [
+		["Green", ["Red", "Blue", "Green"], 0, 2],
+		["Red", ["Red", "Blue", "Green"], 2, 0],
+		["2", ["Red", "Blue", "Green"], 0, 1],
+		["blue", ["Red", "Blue", "Green"], 0, 1],
+		["http 2", ["HTTP/2", "HTTP/1.1"], 0, 0],
+		["1.1", ["HTTP/2", "HTTP/1.1"], 0, 1],
+	]) {
+		const result = await trial({ labels, focus, dictation });
+		check(`dictation "${dictation}" lands on the named row`, result.answered && result.pane.focus === wantIndex, JSON.stringify({ focus: result.pane.focus, want: wantIndex, answered: result.answered }));
+	}
+
+	for (const [dictation, checked, wantChecked] of [
+		["Blue", [], [1]],
+		["Green", [1], [1, 2]],
+		["Blue", [1], [1]],
+	]) {
+		const result = await trial({ labels: ["Red", "Blue", "Green"], checked, multi: true, dictation });
+		const got = [...result.pane.checked].sort().join(",");
+		const want = [...wantChecked].sort().join(",");
+		check(`multi "${dictation}" with pre-checked [${checked}] ends checked [${want}]`, result.answered && got === want, JSON.stringify({ got, want }));
+	}
+
+	for (const dictation of ["s", "zz", "nope"]) {
+		const result = await trial({ labels: ["Red", "Blue"], dictation });
+		check(`short/unknown "${dictation}" is refused`, result.answered === false && result.state !== "busy", JSON.stringify({ answered: result.answered, state: result.state }));
+	}
+
+	for (const [name, failAt] of [["first key", 0], ["second key", 1], ["the submit key", 2]]) {
+		const result = await trial({ labels: ["Red", "Blue", "Green"], dictation: "Green", sendFailsAt: failAt });
+		check(`send failure on the ${name} does not report an answer`, result.answered === false && result.state !== "busy", JSON.stringify({ answered: result.answered, state: result.state }));
+	}
+}
+
 // --- live attach ---------------------------------------------------------
 const live = process.argv.includes("--live");
 if (!live) {
