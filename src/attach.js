@@ -663,9 +663,9 @@ function readAskBoxes(lines) {
 				// The `Other (type your own)` row is the free-text affordance, not
 				// one of the offered options.
 				if (/^Other \(type your own\)$/.test(label)) continue;
-				// A filled marker means checked; U+F14A is the Nerd Font checked
-				// box, U+F046/U+F10C the empty ones.
-				const checkedMarker = row.marker === "\uf14a" || row.marker === "\u2611" || row.marker === "\u25cf";
+				// A checked row renders U+F14A where an unchecked one renders
+				// U+F096 (measured live: toggling a row with Space swaps those two).
+				const checkedMarker = row.marker === "\uf14a";
 				if (checkedMarker) box.checked.add(box.options.length);
 				rowIndex++;
 				if (row.focus) box.focusRow = rowIndex;
@@ -705,11 +705,19 @@ function splitOptionRow(content) {
 
 const FOCUS = /[\uf054\u276f\u25b6]/;
 
-/** True for the glyphs omp uses as option markers (Nerd Font radio/checkbox). */
+/**
+ * True for the glyphs omp uses as option markers.
+ *
+ * Measured across three live captures (single-select, multi-select, approval):
+ * every marker is a Nerd Font private-use glyph — U+F096 and U+F10C observed —
+ * while the focus glyph is always U+F054. Geometric shapes and dingbats are NOT
+ * markers on this wire, so accepting them risked reading a label like `★ Starred`
+ * as a marker row; only the private-use area is treated as a marker.
+ */
 function isMarker(glyph) {
 	if (!glyph) return false;
 	const code = glyph.codePointAt(0);
-	return (code >= 0xe000 && code <= 0xf8ff) || (code >= 0x25a0 && code <= 0x25ff) || (code >= 0x2600 && code <= 0x27bf);
+	return code >= 0xe000 && code <= 0xf8ff;
 }
 
 /** Resolve a dictated answer to an option index.
