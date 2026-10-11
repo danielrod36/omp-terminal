@@ -146,7 +146,22 @@ export function createBridge(config) {
 		if (existing) return existing;
 		if (pendingSpawns.has(sessionId)) return pendingSpawns.get(sessionId);
 		const spawnPromise = (async () => {
-			const found = resumePath ?? findOmpSession(config, sessionId)?.path ?? null;
+			// A scan failure must not masquerade as "unknown id": starting fresh
+			// would silently drop the resume and fork the wearer's thread with no
+			// error anywhere. Surface it instead.
+			let found = resumePath ?? null;
+			if (!found) {
+				try {
+					found = findOmpSession(config, sessionId)?.path ?? null;
+				} catch (error) {
+					if (error.code === "SESSION_SCAN_FAILED") {
+						const wrapped = new Error(`could not resolve session ${sessionId ?? "-"}: ${error.message}`);
+						wrapped.statusCode = 503;
+						throw wrapped;
+					}
+					throw error;
+				}
+			}
 			const args = [];
 			// A known transcript resumes in place so the transcript stays the
 			// single source of truth; unknown ids start a fresh session.

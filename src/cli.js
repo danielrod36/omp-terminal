@@ -246,10 +246,11 @@ function loadDotEnv(path = ".env") {
 			// A quoted value is taken verbatim: `#` inside it is content.
 			value = value.slice(1, -1);
 		} else {
-			// Unquoted values end at an inline comment, so `PORT=3456 # x` is a
-			// usable port rather than the string "3456 # x".
-			const comment = value.indexOf("#");
-			if (comment >= 0) value = value.slice(0, comment).trim();
+			// An unquoted value ends at a comment only when the `#` is
+			// whitespace-preceded or opens the value. A bare `#` inside a value is
+			// content — `TOKEN=abc#def` must not be truncated to `abc`.
+			const comment = value.match(/(?:^|\s)#/);
+			if (comment) value = value.slice(0, comment.index).trim();
 		}
 		if (process.env[key] === undefined) process.env[key] = value;
 	}

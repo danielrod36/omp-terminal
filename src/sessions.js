@@ -227,7 +227,12 @@ export function listOmpSessions(config, { limit = 50 } = {}) {
  * an unambiguous id prefix (omp's own `--resume` semantics). A bare substring
  * test — the previous behaviour — resolved arbitrary garbage like `"1"` to a
  * timestamp containing that digit, so a typo resumed and exposed an unrelated
- * transcript. Ambiguity resolves to null rather than guessing.
+ * transcript. Ambiguity resolves to `null` rather than guessing.
+ *
+ * A `null` means "no such session". A scan that could not complete (the root
+ * vanished, EMFILE, EACCES) is never reported as `null`: callers treat a miss as
+ * "start fresh", so a transient failure must not silently drop a resume. It
+ * throws a tagged error instead, which callers surface or retry.
  */
 export function findOmpSession(config, idOrPath) {
 	if (!idOrPath) return null;
@@ -237,17 +242,19 @@ export function findOmpSession(config, idOrPath) {
 	}
 	const root = config.sessionsRoot;
 	if (!existsSync(root)) return null;
+	let rootEntries;
+	try {
+		rootEntries = readdirSync(root);
+	} catch (error) {
+		const wrapped = new Error(`could not scan the session root ${root}: ${error.message}`);
+		wrapped.code = "SESSION_SCAN_FAILED";
+		throw wrapped;
+	}
 	// Prefix matching follows omp's `--resume` semantics and needs enough
 	// characters to be meaningful; shorter inputs are only ever exact matches.
 	const allowPrefix = idOrPath.length >= 6;
 	const prefixMatches = [];
 	let exactFallback = null;
-	let rootEntries;
-	try {
-		rootEntries = readdirSync(root);
-	} catch {
-		return null;
-	}
 	for (const dirName of rootEntries) {
 		const dir = join(root, dirName);
 		let entries;
@@ -315,7 +322,15 @@ export function ompHistory(config, idOrPath, limit = 10) {
 		for (let chunk = 0; chunk < MAX_CHUNKS && end > 0 && collected.length < limit; chunk++) {
 			const start = Math.max(0, end - CHUNK);
 			const buffer = Buffer.allocUnsafe(end - start);
-			const read = readSync(fd, buffer, 0, buffer.length, start);
+			// A read can fail mid-file (a truncated or rotated transcript). What was
+			// already collected is valid history, so keep it and stop reading rather
+			// than letting the throw escape into the route's 200-with-error path.
+			let read;
+			try {
+				read = readSync(fd, buffer, 0, buffer.length, start);
+			} catch {
+				break;
+			}
 			const text = buffer.toString("utf8", 0, read);
 			// A chunk boundary can split a record; drop the leading partial line
 			// when this chunk does not begin at the file head.

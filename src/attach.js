@@ -309,7 +309,10 @@ export class AttachSession {
 			// the TUI stopped mid-step). Arm the settle timer rather than only
 			// cancelling, or the session strands in `busy` with nothing to clear it.
 			this.#noteSettled();
-			if (role === "user" && this.state !== "busy" && this.state !== "awaiting") {
+			// Both roles mean the agent is still working. If a quiet gap already
+			// reported `idle`, resuming must restore `busy` — otherwise the lens
+			// shows a finished turn while the transcript is still growing.
+			if (this.state !== "busy" && this.state !== "awaiting") {
 				this.state = "busy";
 				emit(this.id, statusFrame(this.id, "busy", this.provider));
 			}
@@ -647,20 +650,34 @@ function readAskBoxes(lines) {
 		//   ├─…─┤
 		//   │ <key hints>
 		//   ╰─…─╯
-		const box = { header: [], options: [], checked: new Set(), focusRow: -1, help: "", framedRows: 0 };
+		const box = { header: [], options: [], checked: new Set(), focusRow: -1, help: "", framedRows: 0, closed: false };
 		let rowIndex = -1;
 		for (let index = start + 1; index < lines.length; index++) {
 			const trimmed = lines[index].trim();
 			if (/^[╰└]/.test(trimmed)) break;
 			const framed = /^[│|]/.test(trimmed);
 			if (framed) box.framedRows++;
+			// Option rows live between the two `├` rules (question above, key hints
+			// below). Once the option block has closed, a framed row is the key-hint
+			// bar — record it for the toggle/select signal, but never parse it as an
+			// option, so a hint row beginning with a PUA icon cannot phantom-shift
+			// the option list.
+			if (/^[├┝]/.test(trimmed)) {
+				if (box.options.length > 0) box.closed = true;
+				continue;
+			}
+			if (box.closed) {
+				const hint = trimmed.replace(/^[│|]\s?/, "").replace(/\s?[│|]$/, "").trim();
+				if (/\b(toggle|select|submit)\b/.test(hint)) box.help = hint;
+				continue;
+			}
 			// The row keeps its leading whitespace: the focus column is
 			// whitespace-delimited, so trimming here would erase the focus marker
 			// before it can be read. Only the trailing border and padding go.
 			const content = framed
 				? trimmed.replace(/^[│|]\s?/, "").replace(/\s?[│|]$/, "").trimEnd()
 				: trimmed;
-			if (!content.trim() || /^[├┝]/.test(trimmed)) continue;
+			if (!content.trim()) continue;
 			// An option row: an optional focus glyph, then the marker glyph, then
 			// the label. Parsing by structure (`focus? marker label`) rather than by
 			// "a glyph the label cannot start with" keeps labels that themselves
@@ -683,10 +700,6 @@ function readAskBoxes(lines) {
 				continue;
 			}
 			if (box.options.length === 0) box.header.push(content);
-			// The key-hint bar names the interaction: multi-select says `toggle`,
-			// single-select says `select`. The marker glyph alone cannot tell them
-			// apart (both render U+F096 when unchecked).
-			else if (/\b(toggle|select|submit)\b/.test(content)) box.help = content;
 		}
 		boxes.push(box);
 	}
@@ -741,28 +754,33 @@ function resolveRequestedIndex(text, options) {
 	if (!text) return -1;
 	const lowered = text.toLowerCase().trim();
 	if (!lowered) return -1;
+	const tokens = lowered.split(/[^a-z0-9]+/).filter(Boolean);
 	// 1. The dictation IS a label (including a label like "Option 2").
 	const byLabel = options.findIndex(option => option.label.toLowerCase() === lowered);
 	if (byLabel >= 0) return byLabel;
-	// 2. A number token anywhere in the dictation, 1-based. The pre-PR code
-	// stripped every non-digit, so "option 2" resolved; bare-word dictations
-	// ("two") must keep working too.
-	const digits = lowered.match(/\d+/);
-	const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
-	const wordMatch = lowered.split(/[^a-z]+/).find(token => token in words);
-	const numeric = digits ? Number(digits[0]) : wordMatch ? words[wordMatch] : NaN;
-	if (Number.isInteger(numeric) && numeric >= 1 && numeric <= options.length) return numeric - 1;
-	// 3. A unique partial label, but only on a word boundary and long enough to
-	// be meaningful: a two-character misrecognition must not silently answer.
-	if (lowered.length >= 3) {
-		const partials = [];
+	// 2. A label match on TOKENS, checked before any bare number: a dictation that
+	// names a digit-containing label ("http 2" for `HTTP/2`) must not be read as a
+	// row number and answer a different option. The dictation's tokens must form a
+	// prefix of the label's tokens (so "http 2" ⇒ ["http","2"] matches HTTP/2), and
+	// the first token needs 3+ characters so a short misrecognition resolves to
+	// nothing rather than guessing.
+	const partials = [];
+	if (tokens.length > 0 && tokens[0].length >= 3) {
 		options.forEach((option, index) => {
-			const label = option.label.toLowerCase();
-			if (label.startsWith(lowered) || label.split(/[^a-z0-9]+/).some(token => token.startsWith(lowered))) {
-				partials.push(index);
-			}
+			const labelTokens = option.label.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+			if (tokens.length > labelTokens.length) return;
+			if (tokens.every((token, position) => labelTokens[position].startsWith(token))) partials.push(index);
 		});
-		if (partials.length === 1) return partials[0];
+	}
+	if (partials.length === 1) return partials[0];
+	// 3. A bare number token ("2", "two", "option 2"). Only a dictation that is
+	// otherwise just a number counts, so a numeric label reference cannot be
+	// mistaken for a row index.
+	const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+	const numericTokens = tokens.filter(token => /^\d+$/.test(token) || token in words);
+	if (numericTokens.length === 1) {
+		const numeric = /^\d+$/.test(numericTokens[0]) ? Number(numericTokens[0]) : words[numericTokens[0]];
+		if (numeric >= 1 && numeric <= options.length) return numeric - 1;
 	}
 	return -1;
 }
