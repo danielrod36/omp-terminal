@@ -215,6 +215,7 @@ export function findOmpSession(config, idOrPath) {
 	// characters to be meaningful; shorter inputs are only ever exact matches.
 	const allowPrefix = idOrPath.length >= 6;
 	const prefixMatches = [];
+	let exactFallback = null;
 	for (const dirName of readdirSync(root)) {
 		const dir = join(root, dirName);
 		let entries;
@@ -234,8 +235,11 @@ export function findOmpSession(config, idOrPath) {
 			if (namedId === idOrPath || name === idOrPath) {
 				const head = parseHead(file);
 				if (head.sessionId === idOrPath) return { ...head, path: file };
-				// The file name matched but the head disagrees (an odd/truncated
-				// transcript): keep scanning for a clean match.
+				// The file name matched but the head disagrees or is unreadable
+				// (a truncated or mid-write transcript). An exact file-name hit is
+				// unambiguous, so remember it and keep looking for a head match;
+				// this is a last resort, never a prefix guess.
+				if (!exactFallback) exactFallback = { ...head, path: file };
 				continue;
 			}
 			if (!allowPrefix || !namedId.startsWith(idOrPath)) continue;
@@ -244,6 +248,7 @@ export function findOmpSession(config, idOrPath) {
 	}
 	// Ambiguity must not depend on readdir order: collect every prefix hit and
 	// refuse when more than one transcript could be meant.
+	if (exactFallback) return exactFallback;
 	return prefixMatches.length === 1 ? prefixMatches[0] : null;
 }
 

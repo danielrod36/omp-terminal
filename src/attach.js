@@ -43,10 +43,13 @@ export class AttachSession {
 	}
 
 	async start() {
-		// Only a transcript resolved here needs its offset computed; when the
-		// caller supplied one (server.js, or a resuming attachment) the current
-		// offset is authoritative and must not be clobbered to EOF.
-		if (!this.transcriptPath || !existsSync(this.transcriptPath)) {
+		// A caller-supplied transcript starts at its end: the desk's history is
+		// not the bridge's to re-emit, and leaving `offset` at 0 would replay all
+		// of it to the lens on the first poll. When no path exists yet, resolution
+		// finds one and the same rule applies.
+		if (this.transcriptPath && existsSync(this.transcriptPath)) {
+			if (this.offset === 0) this.offset = statSync(this.transcriptPath).size;
+		} else {
 			this.#resolveTranscript();
 		}
 		this.timer = setInterval(() => this.#poll().catch(error => log.warn(`poll failed: ${error.message}`)), this.config.tailIntervalMs);
@@ -209,8 +212,12 @@ export class AttachSession {
 					lineStart = breakAt + 1;
 				}
 				carry = lineStart < combined.length ? Buffer.from(combined.subarray(lineStart)) : Buffer.alloc(0);
+				// Only the bytes belonging to complete records are consumed. A
+				// trailing fragment stays unread so the next poll re-reads it whole:
+				// advancing past it would drop the record once the writer finishes
+				// it, which is exactly what a half-flushed line looks like.
+				this.offset = cursor - carry.length;
 			}
-			this.offset = cursor;
 		} catch (error) {
 			log.warn(`tail failed: ${error.message}`);
 		} finally {
@@ -262,9 +269,11 @@ export class AttachSession {
 		const content = record.message?.content;
 		this.lastActivity = Date.now();
 		if (role === "user" || role === "toolResult") {
-			// A new turn or in-flight work: not settled.
-			clearTimeout(this.settleTimer);
-			this.settleTimer = null;
+			// A new turn or in-flight work: not settled yet, but the transcript can
+			// also END on one of these (the agent answered inside a tool result, or
+			// the TUI stopped mid-step). Arm the settle timer rather than only
+			// cancelling, or the session strands in `busy` with nothing to clear it.
+			this.#noteSettled();
 			if (role === "user" && this.state !== "busy" && this.state !== "awaiting") {
 				this.state = "busy";
 				emit(this.id, statusFrame(this.id, "busy", this.provider));
@@ -303,7 +312,12 @@ export class AttachSession {
 	async #scrapeDialog(pane) {
 		if (pane === null) return;
 		const dialog = readDialogFromPane(pane);
-		const signature = dialog ? `${dialog.kind}:${dialog.toolName}:${dialog.prompt}` : "";
+		// The signature includes the option set and multi flag: a dialog that
+		// changes shape in place (an option appearing, a single turning multi) is
+		// a different dialog and must be re-announced.
+		const signature = dialog
+			? `${dialog.kind}:${dialog.toolName}:${dialog.prompt}:${dialog.multi ? "multi" : "single"}:${dialog.options.map(option => option.label).join("|")}`
+			: "";
 		if (signature === this.lastDialogSignature) return;
 		if (!dialog) {
 			this.lastDialogSignature = "";
@@ -441,7 +455,10 @@ export class AttachSession {
 		let cursor = dialog.focusedIndex;
 		if (!(await this.#moveCursor(wanted - cursor))) return false;
 		cursor = wanted;
-		if (!(await this.send("Space", { enter: false }))) return false;
+		// `Space` toggles, so sending it to a row that is already checked would
+		// silently uncheck the desk user's selection.
+		const alreadyChecked = (dialog.checked ?? []).includes(wanted);
+		if (!alreadyChecked && !(await this.send("Space", { enter: false }))) return false;
 		if (cursor !== dialog.focusedIndex && !(await this.#moveCursor(dialog.focusedIndex - cursor))) return false;
 		if (!(await this.send("Enter", { enter: false }))) return false;
 		return this.#answered();
@@ -457,6 +474,10 @@ export class AttachSession {
 	}
 
 	#answered() {
+		// A timer armed by an earlier assistant record would fire shortly after
+		// this answer and report `idle` while the agent is still working.
+		clearTimeout(this.settleTimer);
+		this.settleTimer = null;
 		this.lastDialogSignature = "";
 		this.state = "busy";
 		emit(this.id, statusFrame(this.id, "busy", this.provider));
@@ -604,9 +625,13 @@ function readAskBoxes(lines) {
 			if (!content || /^[├┝]/.test(trimmed)) continue;
 			// An option row: `<focus> <marker> <label>`. The marker glyph differs
 			// between Nerd Font revisions (U+F096, U+F10C, U+F046, U+F14A have all
-			// been observed live), so accept any private-use/box glyph immediately
-			// before the label rather than enumerating them.
-			const option = content.match(/^([\uf054\u276f\u25b6\s]*)([\uE000-\uF8FF\u25a0-\u25ff\u2600-\u27bf])\s*(.+?)\s*$/u);
+			// been observed live), so accept any single private-use/box glyph
+			// before the label rather than enumerating them. The label is required
+			// to start with a non-marker character so a label that itself contains
+			// a PUA glyph is not truncated.
+			const option = content.match(
+				/^([\uf054\u276f\u25b6\s]*)([\uE000-\uF8FF\u25a0-\u25ff\u2600-\u27bf])\s+([^\uE000-\uF8FF\u25a0-\u25ff\u2600-\u27bf].*?)\s*$/u,
+			);
 			if (option && option[3] && framed) {
 				const label = option[3];
 				// The `Other (type your own)` row is the free-text affordance, not
@@ -632,17 +657,27 @@ function readAskBoxes(lines) {
 	return boxes;
 }
 
-/** Resolve a dictated answer to an option index: label match, then 1-based number. */
+/**
+ * Resolve a dictated answer to an option index.
+ *
+ * Ordered by confidence: exact label, then a 1-based number (digit or word),
+ * then a unique partial label. An ambiguous partial match resolves to nothing
+ * rather than guessing — answering the wrong option is worse than declining.
+ */
 function resolveRequestedIndex(text, options) {
 	if (!text) return -1;
-	const byLabel = options.findIndex(option => option.label.toLowerCase() === text.toLowerCase());
+	const lowered = text.toLowerCase();
+	const byLabel = options.findIndex(option => option.label.toLowerCase() === lowered);
 	if (byLabel >= 0) return byLabel;
 	// Spelled-out numbers ("two") are as common as digits on the lens.
 	const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
-	const numeric = /^\d+$/.test(text) ? Number(text) : words[text.toLowerCase()];
-	if (numeric >= 1 && numeric <= options.length) return numeric - 1;
-	const partial = options.findIndex(option => option.label.toLowerCase().includes(text.toLowerCase()));
-	return partial;
+	const numeric = /^\d+$/.test(text) ? Number(text) : words[lowered];
+	if (Number.isInteger(numeric) && numeric >= 1 && numeric <= options.length) return numeric - 1;
+	const partials = [];
+	options.forEach((option, index) => {
+		if (option.label.toLowerCase().includes(lowered)) partials.push(index);
+	});
+	return partials.length === 1 ? partials[0] : -1;
 }
 
 /** Every tmux pane currently hosting an interactive omp TUI. */

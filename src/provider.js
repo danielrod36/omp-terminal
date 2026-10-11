@@ -237,9 +237,12 @@ export class OwnedSession {
 
 	#handleDialog(frame) {
 		const { id, method } = frame;
-		// `cancel` settles a dialog omp already closed and must not be stored:
-		// it would sit in the map forever, since no answer ever removes it.
-		if (method !== "cancel") this.pendingDialogs.set(id, frame);
+		// Only dialogs the wearer can answer are tracked: host-chrome frames
+		// (setWidget/setTitle/notify/setStatus/open_url) and `cancel` have no
+		// answer, so storing them would grow the map for the process lifetime.
+		const answerable = method === "select" || method === "confirm" || method === "ask" || method === "input" || method === "editor";
+		if (answerable) this.pendingDialogs.set(id, frame);
+		else this.pendingDialogs.delete(id);
 		if (method === "select") {
 			const lines = String(frame.title ?? "").split("\n");
 			const toolName = lines[0]?.replace(/^Allow tool:\s*/, "") ?? "tool";
