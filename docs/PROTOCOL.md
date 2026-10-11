@@ -271,6 +271,13 @@ Verified live: a tmux pane whose `pane_current_command` is `omp` hosts the TUI.
   `pane_current_path` → `<sessionsRoot>/<encoded-cwd>/`. Line offsets are bytes
   (the transcript can contain non-ASCII), and a fresh assistant record is
   rewound to so a turn finishing around a transcript swap still paints.
+- **Two TUIs in one cwd share one transcript.** Measured: starting a second
+  `omp` in the same directory resumed the existing session file rather than
+  minting a new one — both panes appended to the same bucket file. The "which
+  pane owns this transcript" question is therefore moot for panes in one cwd:
+  there is one conversation, and the newest file in the bucket is it. (A pane's
+  open files cannot be used to disambiguate either: `omp` opens the transcript
+  per append and holds no lasting descriptor.)
 
 The bridge never owns the process in this mode: the desk agent stays the sole
 writer of the transcript.

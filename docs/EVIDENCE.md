@@ -66,6 +66,8 @@ omp v18.8.7, binary on `PATH`; source types from the packed npm tarball.
 | Multi toggle | live: `Space` marks the row checked (`U+F14A`), `Enter` submits |
 | Transcript location | `<sessionsRoot>/<encoded-cwd>/*.jsonl`; `pane_current_path` -> encoded bucket |
 | Byte-exact rewind | transcript line offsets are bytes, not JS string indices; `#resumeOffset` scans the raw Buffer |
+| Two TUIs share one transcript | live: a second `omp` in the same cwd resumed the existing session file; both panes appended to it (one `session` record, both prompts in one file) |
+| No fd to disambiguate a pane | live: `/proc/<pid>/fd` for both `omp` processes listed no transcript; omp opens it per append |
 | A closed dialog leaves an echo | the transcript keeps a borderless `╭─── Ask 1 questions ─…` box after the dialog closes; it must not be read as an open dialog (no `\uf054` focus row, no framed option rows) |
 
 ## Bridge self-test
