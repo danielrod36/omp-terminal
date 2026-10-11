@@ -43,9 +43,11 @@ export class AttachSession {
 	}
 
 	async start() {
-		this.#resolveTranscript();
-		if (this.transcriptPath && existsSync(this.transcriptPath)) {
-			this.offset = statSync(this.transcriptPath).size;
+		// Only a transcript resolved here needs its offset computed; when the
+		// caller supplied one (server.js, or a resuming attachment) the current
+		// offset is authoritative and must not be clobbered to EOF.
+		if (!this.transcriptPath || !existsSync(this.transcriptPath)) {
+			this.#resolveTranscript();
 		}
 		this.timer = setInterval(() => this.#poll().catch(error => log.warn(`poll failed: ${error.message}`)), this.config.tailIntervalMs);
 		this.timer.unref?.();
@@ -182,27 +184,47 @@ export class AttachSession {
 			if (size < this.offset) this.offset = size; // truncated/rotated
 			return;
 		}
+		// Read in bounded chunks and split on newline BYTES: decoding a chunk that
+		// ends mid-multibyte-character corrupts the record straddling the
+		// boundary, so only complete records are decoded. The residue is carried
+		// to the next read rather than being parsed.
+		const CHUNK = 256 * 1024;
+		const newline = 0x0a;
 		const fd = openSync(this.transcriptPath, "r");
 		try {
-			const length = size - this.offset;
-			const buffer = Buffer.allocUnsafe(length);
-			readSync(fd, buffer, 0, length, this.offset);
-			this.offset = size;
-			const text = buffer.toString("utf8");
-			const lines = text.split("\n");
-			// Keep the trailing partial line for the next pass.
-			const complete = lines.slice(0, -1).filter(line => line.trim());
-			for (const line of complete) {
-				try {
-					this.#handleRecord(JSON.parse(line));
-				} catch {
-					/* a record the bridge cannot parse is not fatal for the tail */
+			let cursor = this.offset;
+			let carry = Buffer.alloc(0);
+			while (cursor < size) {
+				const length = Math.min(CHUNK, size - cursor);
+				const buffer = Buffer.allocUnsafe(length);
+				const read = readSync(fd, buffer, 0, length, cursor);
+				if (read <= 0) break;
+				cursor += read;
+				const combined = carry.length > 0 ? Buffer.concat([carry, buffer.subarray(0, read)]) : buffer.subarray(0, read);
+				let lineStart = 0;
+				for (;;) {
+					const breakAt = combined.indexOf(newline, lineStart);
+					if (breakAt < 0) break;
+					if (breakAt > lineStart) this.#handleLine(combined.toString("utf8", lineStart, breakAt));
+					lineStart = breakAt + 1;
 				}
+				carry = lineStart < combined.length ? Buffer.from(combined.subarray(lineStart)) : Buffer.alloc(0);
 			}
+			this.offset = cursor;
 		} catch (error) {
 			log.warn(`tail failed: ${error.message}`);
 		} finally {
 			closeSync(fd);
+		}
+	}
+
+	/** Parse and dispatch one complete transcript record. */
+	#handleLine(line) {
+		if (!line.trim()) return;
+		try {
+			this.#handleRecord(JSON.parse(line));
+		} catch {
+			/* a record the bridge cannot parse is not fatal for the tail */
 		}
 	}
 
