@@ -1,6 +1,6 @@
 import { networkInterfaces } from "node:os";
 import { execSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { loadConfig, DEFAULTS } from "./config.js";
 import { configureLog, createLogger } from "./log.js";
 import { createBridge } from "./server.js";
@@ -178,12 +178,12 @@ function resolveHost(flags) {
 	return { label: "LAN", address: address ?? "" };
 }
 
-function printBanner({ host, port, token, cwd, name, providerLabel, tokenSource }) {
+function printBanner({ host, port, token, cwd, name, providerLabel, tokenSource, version }) {
 	const logo = ["██  ████████", "████        ", "██  ████████", "████        ", "██  ████████"];
 	const label = Math.max("Local".length, "Token".length, "Name".length, "CWD".length, host.label.length);
 	const pad = text => text.padEnd(label);
 	const info = [
-		"omp-terminal v0.1.0 (oh-my-pi bridge)",
+		`omp-terminal v${version} (oh-my-pi bridge)`,
 		name ? `${pad("Name")}:  ${name}` : "",
 		`${pad("Local")}:  http://localhost:${port}`,
 		host.address ? `${pad(host.label)}:  http://${host.address}:${port}` : "",
@@ -216,20 +216,56 @@ function printBanner({ host, port, token, cwd, name, providerLabel, tokenSource 
 	console.log("");
 }
 
+/**
+ * Load `.env` from the working directory when present.
+ *
+ * Node's own `--env-file` is not used because the CLI is a plain script with a
+ * shebang; parsing the small subset (KEY=value, `#` comments, optional quotes)
+ * keeps zero dependencies and matches what `.env.example` documents. Real
+ * environment variables always win over file entries.
+ */
+function loadDotEnv(path = ".env") {
+	if (!existsSync(path)) return;
+	let text;
+	try {
+		text = readFileSync(path, "utf8");
+	} catch {
+		return;
+	}
+	for (const rawLine of text.split("\n")) {
+		const line = rawLine.trim();
+		if (!line || line.startsWith("#")) continue;
+		const eq = line.indexOf("=");
+		if (eq <= 0) continue;
+		const key = line.slice(0, eq).trim();
+		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+		let value = line.slice(eq + 1).trim();
+		if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+			value = value.slice(1, -1);
+		}
+		if (process.env[key] === undefined) process.env[key] = value;
+	}
+}
+
 export async function main(argv) {
 	const flags = parseArgs(argv);
+	const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 	if (flags.help) {
 		console.log(HELP);
 		return;
 	}
 	if (flags.version) {
-		const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 		console.log(`omp-terminal ${pkg.version}`);
 		return;
 	}
 
+	// `.env` is read before config resolution so both env-var and file values
+	// flow through the same precedence chain.
+	loadDotEnv();
 	const config = loadConfig({ flags });
-	configureLog({ level: flags.logLevel ?? "info", file: config.logFile });
+	// `loadConfig` already merges flag/env/default for the log level; reading
+	// `flags.logLevel` here (the previous behaviour) made the env var a no-op.
+	configureLog({ level: config.logLevel, file: config.logFile });
 
 	if (config.expose && !providerNames().includes(config.expose)) {
 		throw new Error(`unsupported expose provider '${config.expose}' (known: ${providerNames().join(", ")})`);
@@ -248,6 +284,7 @@ export async function main(argv) {
 		name: config.name,
 		providerLabel: config.providerLabel,
 		tokenSource: config.tokenSource,
+		version: pkg.version,
 	});
 
 	// Start the requested public tunnel and print a second pairing QR for it.

@@ -209,8 +209,23 @@ An `ask` question arrives as `method:"ask"` (**only after the host opts in with
  "answers":[{"id":"colour","selectedOptions":["Blue"]}]}
 ```
 
+`selectedOptions` entries are validated against the offered labels and an
+unknown label **fails the whole tool call** (`Ask dialog answer "colour"
+selected unknown option "…"`). Free text — a dictated label that matches no
+option — must travel as `customInput` instead:
+
+```json
+{"type":"extension_ui_response","id":"…",
+ "answers":[{"id":"colour","selectedOptions":[],"customInput":"Chartreuse"}]}
+```
+
+Verified live: that shape resolves with `User provided custom input: Chartreuse`
+and `isError: false`, while the `selectedOptions` form errors.
+
 `confirm` resolves with `{"confirmed": true}`, `input`/`editor` with
-`{"value": "…"}`.
+`{"value": "…"}`. omp also emits `method:"cancel"` with a `targetId` when it
+settles a dialog itself (abort or timeout): the host must close that dialog,
+and a late answer to it is ignored.
 
 ### 2.4 Sessions, busy handling, and abort
 

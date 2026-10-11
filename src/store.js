@@ -36,9 +36,15 @@ export function saveStore(patch, path = CONFIG_PATH) {
 	try {
 		mkdirSync(dirname(path), { recursive: true });
 		writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-		// writeFileSync honours an existing file's mode, so force 0600 explicitly:
-		// the token is a credential and must not be group/world readable.
-		chmodSync(path, 0o600);
+		try {
+			// writeFileSync honours an existing file's mode, so force 0600
+			// explicitly: the token is a credential and must not be group/world
+			// readable. A concurrent replace can make the chmod fail after the
+			// write landed — that is not a reason to report the save as failed.
+			chmodSync(path, 0o600);
+		} catch (error) {
+			log.warn(`could not tighten permissions on ${path}: ${error.message}`);
+		}
 		return true;
 	} catch (error) {
 		log.warn(`could not persist config to ${path}: ${error.message}`);
