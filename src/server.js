@@ -97,6 +97,7 @@ export function createBridge(config) {
 	function dropIfDead(session) {
 		if (!session || !isDead(session)) return session;
 		sessions.delete(session.id);
+		if (session.tmuxSession) attachRegistry.delete(session.tmuxSession);
 		for (const [alias, canonical] of sessionAliases) {
 			if (canonical === session.id) sessionAliases.delete(alias);
 		}

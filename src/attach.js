@@ -36,6 +36,7 @@ export class AttachSession {
 		this.lastActivity = Date.now();
 		this.offset = 0;
 		this.timer = null;
+		this.settleTimer = null;
 		this.lastDialogSignature = "";
 		/** Assistant record timestamps already painted, so a re-read never duplicates. */
 		this.seenAssistant = new Set();
@@ -72,9 +73,17 @@ export class AttachSession {
 		// and newer than what we are currently following.
 		if (!path.startsWith(`${this.config.sessionsRoot}/${sessionDirName(this.cwd)}/`)) return;
 		if (this.transcriptPath && existsSync(this.transcriptPath) && statSync(this.transcriptPath).mtimeMs > statSync(path).mtimeMs) return;
+		// Resolve the new offset BEFORE committing the path: a file rotating away
+		// between the two would otherwise leave the new path with the old offset.
+		let offset;
+		try {
+			offset = this.#resumeOffset(path);
+		} catch {
+			return;
+		}
 		log.info(`attach ${this.id} adopted transcript ${path}`);
 		this.transcriptPath = path;
-		this.offset = this.#resumeOffset(path);
+		this.offset = offset;
 	}
 
 	/**
@@ -83,6 +92,10 @@ export class AttachSession {
 	 * Normally the end (past history). If its newest assistant record is within
 	 * the busy window, start at that record so a turn that completed before the
 	 * swap is not lost.
+	 *
+	 * Offsets are computed on the raw Buffer, not on a JS string: string indices
+	 * are UTF-16 code units, and a transcript containing non-ASCII would rewind
+	 * mid-line and drop the very record this exists to preserve.
 	 */
 	#resumeOffset(path) {
 		const size = statSync(path).size;
@@ -94,27 +107,31 @@ export class AttachSession {
 		try {
 			const buffer = Buffer.allocUnsafe(size - start);
 			const read = readSync(fd, buffer, 0, buffer.length, start);
-			const text = buffer.toString("utf8", 0, read);
-			const lines = text.split("\n");
-			// Byte offset of each line's first character within the window.
-			const offsets = [];
-			let cursor = 0;
-			for (const line of lines) {
-				offsets.push(cursor);
-				cursor += line.length + 1;
-			}
-			for (let index = lines.length - 1; index >= 0; index--) {
-				if (!lines[index].trim()) continue;
+			const slice = buffer.subarray(0, read);
+			const newline = 0x0a;
+			// Forward scan over bytes: record each line's byte offset, then take
+			// the LAST assistant record in the window. When the window starts
+			// mid-line its first fragment is not a parseable record and is skipped.
+			let lastAssistant = -1;
+			let lineStart = 0;
+			const at = offset => {
+				if (offset <= lineStart) return;
 				let record;
 				try {
-					record = JSON.parse(lines[index]);
+					record = JSON.parse(slice.toString("utf8", lineStart, offset));
 				} catch {
-					continue;
+					return;
 				}
 				if (record?.type === "message" && record.message?.role === "assistant" && record.message?.timestamp !== undefined) {
-					return start + offsets[index];
+					lastAssistant = lineStart;
 				}
+			};
+			for (let index = 0; index < slice.length; index++) {
+				if (slice[index] !== newline) continue;
+				at(index);
+				lineStart = index + 1;
 			}
+			if (lastAssistant >= 0) return start + lastAssistant;
 		} catch {
 			/* unreadable tail: fall through to the end */
 		} finally {
@@ -189,18 +206,51 @@ export class AttachSession {
 		}
 	}
 
+	/**
+	 * Report `idle` when the transcript shows the turn really ended.
+	 *
+	 * An assistant record can be followed by more tool results, so the settle
+	 * signal is its absence: after an assistant message, the next user record
+	 * (a new turn) or a quiet transcript within the busy window means the desk
+	 * agent stopped. Tracking this on the record stream keeps the lens from
+	 * flipping to idle in the middle of a multi-step turn.
+	 */
+	#noteSettled() {
+		clearTimeout(this.settleTimer);
+		const settlesAt = Date.now();
+		this.settleTimer = setTimeout(() => {
+			this.settleTimer = null;
+			// A dialog on the pane has its own lifecycle (#scrapeDialog owns the
+			// awaiting → idle transition); do not race it.
+			if (this.lastDialogSignature) return;
+			// Only settle if nothing has been written since this timer was armed:
+			// a follow-up record means the turn is still running.
+			if (this.lastActivity > settlesAt) return;
+			if (this.state === "busy" || this.state === "awaiting") {
+				this.state = "idle";
+				emit(this.id, statusFrame(this.id, "idle", this.provider));
+			}
+		}, Math.max(1000, (this.config.tailIntervalMs ?? 500) * 4));
+		this.settleTimer.unref?.();
+	}
+
 	#handleRecord(record) {
 		if (record?.type !== "message") return;
 		const role = record.message?.role;
 		const content = record.message?.content;
 		this.lastActivity = Date.now();
-		// A trailing assistant record means the desk turn finished; without this
-		// the row would read "busy" forever after the first answered dialog.
-		if (role === "assistant" && this.state !== "idle") {
-			this.state = "idle";
-			emit(this.id, statusFrame(this.id, "idle", this.provider));
+		if (role === "user" || role === "toolResult") {
+			// A new turn or in-flight work: not settled.
+			clearTimeout(this.settleTimer);
+			this.settleTimer = null;
+			if (role === "user" && this.state !== "busy" && this.state !== "awaiting") {
+				this.state = "busy";
+				emit(this.id, statusFrame(this.id, "busy", this.provider));
+			}
+			return;
 		}
 		if (role === "assistant") {
+			this.#noteSettled();
 			// Dedupe on the record's own identity, not on its text: two turns can
 			// legitimately say the same thing, and a transcript can be re-read
 			// after a target swap. Message timestamps are unique per transcript.
@@ -268,6 +318,9 @@ export class AttachSession {
 						{
 							question: dialog.prompt,
 							header: "",
+							// The app arms its multi-select UI from this flag; the
+							// dialog's own key-hint bar is what identifies it.
+							multi: dialog.multi === true,
 							options: dialog.options.map(option => ({ label: option.label })),
 						},
 					],
@@ -322,36 +375,66 @@ export class AttachSession {
 	async answerPermission(decision) {
 		const pane = await this.capture();
 		const dialog = readDialogFromPane(pane);
-		if (!dialog) return false;
+		if (!dialog || dialog.kind !== "permission") return false;
 		const approved = decision === "allow" || decision === "allowAlways";
-		// The menu opens on Approve; Deny sits one row below.
-		if (!approved && !(await this.send("Down", { enter: false }))) return false;
+		// Find the row by label: the desk user may have moved the cursor, so the
+		// menu is not guaranteed to open on Approve.
+		const options = dialog.options ?? [];
+		const target = options.findIndex(option => (approved ? /^(Approve|Yes)$/i : /^(Deny|No)$/i).test(option.label));
+		const steps = (target >= 0 ? target : approved ? 0 : 1) - (dialog.focusedIndex ?? 0);
+		if (!(await this.#moveCursor(steps))) return false;
 		if (!(await this.send("Enter", { enter: false }))) return false;
-		this.lastDialogSignature = "";
-		this.state = "busy";
-		emit(this.id, statusFrame(this.id, "busy", this.provider));
-		return true;
+		return this.#answered();
 	}
 
 	async answerQuestion(rawAnswer) {
 		const pane = await this.capture();
 		const dialog = readDialogFromPane(pane);
-		if (!dialog) return false;
-		// A dictated answer can name an option by label ("Blue") or by number
-		// ("two" → 2). Both are promised by the README; resolve the label first
-		// and fall back to the digit.
+		if (!dialog || dialog.kind !== "question") return false;
+		// A dictated answer names an option by label ("Blue") or by number
+		// ("two" → 2), relative to the option rows as rendered.
 		const text = String(rawAnswer ?? "").trim();
 		const options = dialog.options ?? [];
-		let index = options.findIndex(option => option.label.toLowerCase() === text.toLowerCase());
-		if (index < 0) {
-			const numeric = Number.parseInt(text.replace(/[^0-9]/g, ""), 10);
-			if (Number.isInteger(numeric) && numeric >= 1 && numeric <= options.length) index = numeric - 1;
-		}
-		if (index < 0) return false;
-		for (let step = 0; step < index; step++) {
-			if (!(await this.send("Down", { enter: false }))) return false;
-		}
+		const wanted = resolveRequestedIndex(text, options);
+		if (wanted < 0) return false;
+		if (dialog.multi) return this.#toggleMulti(dialog, wanted);
+		return this.#selectSingle(dialog, wanted);
+	}
+
+	/** Single-select: move the highlight to the row, then submit. */
+	async #selectSingle(dialog, wanted) {
+		const steps = wanted - dialog.focusedIndex;
+		if (!(await this.#moveCursor(steps))) return false;
 		if (!(await this.send("Enter", { enter: false }))) return false;
+		return this.#answered();
+	}
+
+	/**
+	 * Multi-select: `Down` moves the highlight and `Space` toggles the row under
+	 * it (verified live), so each requested row is visited, toggled, and the
+	 * dialog submitted with `Enter`. The cursor returns to its start row so the
+	 * sequence is independent of any prior state.
+	 */
+	async #toggleMulti(dialog, wanted) {
+		let cursor = dialog.focusedIndex;
+		if (!(await this.#moveCursor(wanted - cursor))) return false;
+		cursor = wanted;
+		if (!(await this.send("Space", { enter: false }))) return false;
+		if (cursor !== dialog.focusedIndex && !(await this.#moveCursor(dialog.focusedIndex - cursor))) return false;
+		if (!(await this.send("Enter", { enter: false }))) return false;
+		return this.#answered();
+	}
+
+	/** Move the dialog highlight by `steps` rows (negative = up). */
+	async #moveCursor(steps) {
+		const key = steps > 0 ? "Down" : "Up";
+		for (let step = 0; step < Math.abs(steps); step++) {
+			if (!(await this.send(key, { enter: false }))) return false;
+		}
+		return true;
+	}
+
+	#answered() {
 		this.lastDialogSignature = "";
 		this.state = "busy";
 		emit(this.id, statusFrame(this.id, "busy", this.provider));
@@ -375,6 +458,8 @@ export class AttachSession {
 	stop() {
 		clearInterval(this.timer);
 		this.timer = null;
+		clearTimeout(this.settleTimer);
+		this.settleTimer = null;
 	}
 
 	kill() {
@@ -385,9 +470,15 @@ export class AttachSession {
 /**
  * Parse an open dialog box out of a captured pane.
  *
- * Two shapes are recognised on the pane (both verified live): an approval box
- * headed `Allow tool: <name>` with an Approve/Deny list, and omp's numbered
- * option rows used by `ask`.
+ * Two shapes are recognised, both verified live against omp 18.8.9:
+ *  - an approval box headed `Allow tool: <name>` with an Approve/Deny list;
+ *  - omp's `ask` dialog: a `╭─ Ask …` box whose body carries a question line
+ *    and option rows prefixed by a radio (`\uf096`) or checkbox marker, each
+ *    option row's focus marker (`\uf054`) identifying the highlighted row.
+ *
+ * The numeric-row heuristic this replaces matched no real omp rendering: `ask`
+ * paints a boxed list, and `select` dialogs are consumed by the RPC UI context,
+ * so no dialog ever produced numbered option rows.
  */
 export function readDialogFromPane(pane) {
 	const lines = String(pane ?? "").split("\n");
@@ -400,56 +491,135 @@ export function readDialogFromPane(pane) {
 	}
 	if (boxStart >= 0) {
 		const body = [];
+		const choices = [];
+		let focusRow = -1;
+		let rowIndex = -1;
 		for (let index = boxStart + 1; index < lines.length; index++) {
-			if (/^[╰└]/.test(lines[index].trim())) break;
-			body.push(lines[index].replace(/^[│|]\s?/, "").replace(/\s?[│|]$/, "").trimEnd());
+			const trimmed = lines[index].trim();
+			if (/^[╰└]/.test(trimmed)) break;
+			const content = trimmed.replace(/^[│|]\s?/, "").replace(/\s?[│|]$/, "").trimEnd();
+			body.push(content);
+			// The choice rows carry the focus marker (verified live on 18.8.9):
+			// `\uf054 Approve` / `   Deny`.
+			const choice = content.match(/^([\uf054\u276f\u25b6\s]*)(Approve|Deny|Yes|No)\s*$/);
+			if (choice) {
+				rowIndex++;
+				if (choice[1].includes("\uf054") || choice[1].includes("\u276f") || choice[1].includes("\u25b6")) focusRow = rowIndex;
+				choices.push(choice[2]);
+			}
 		}
 		const toolName = lines[boxStart]
 			.trim()
 			.replace(/^[╭┌]─*\s*/, "")
 			.replace(/\s*─*[╮┐]$/, "")
 			.replace(/^Allow tool:\s*/, "");
-		return { kind: "permission", toolName, body: body.join("\n"), prompt: toolName, options: [] };
+		return {
+			kind: "permission",
+			toolName,
+			body: body.join("\n"),
+			prompt: toolName,
+			focusedIndex: focusRow >= 0 ? focusRow : 0,
+			options: choices.map(label => ({ label })),
+		};
 	}
-
-	// `ask` renders options as numbered rows under a question line. Require two
-	// numbered rows, or one when the question carries the TUI's own `? ` prompt
-	// prefix — that prefix is emitted only by the dialog, so ordinary prose that
-	// happens to precede a numbered list still cannot read as an open question.
-	const questionLine = findAskQuestion(lines);
-	if (questionLine >= 0) {
-		const options = [];
-		for (let index = questionLine + 1; index < lines.length && options.length < 12; index++) {
-			const match = lines[index].trim().match(/^(\d+)[.)]\s+(.+)$/);
-			if (!match) break;
-			options.push({ label: match[2].trim() });
-		}
-		const prompt = lines[questionLine].trim().replace(/^[?❯]\s*/, "");
-		const dialogPrompt = /^[?❯]\s/.test(lines[questionLine].trim());
-		if (options.length >= 2 || (options.length === 1 && dialogPrompt)) {
-			return {
-				kind: "question",
-				toolName: "ask",
-				body: "",
-				prompt,
-				options,
-			};
-		}
-	}
-	return null;
+	return readAskFromPane(lines);
 }
 
-function findAskQuestion(lines) {
-	for (let index = lines.length - 1; index >= 1; index--) {
-		const line = lines[index].trim();
-		if (!/^\d+[.)]\s+/.test(line)) continue;
-		// The option run must start here; walk to its head to find the question.
-		if (/^\d+[.)]\s+/.test(lines[index - 1]?.trim() ?? "")) continue;
-		const question = lines[index - 1]?.trim() ?? "";
-		if (!question) continue;
-		return index - 1;
+/** The `Ask` dialog box, if one is open at the bottom of the pane. */
+function readAskFromPane(lines) {
+	const boxes = readAskBoxes(lines);
+	if (boxes.length === 0) return null;
+	// Prefer the bottom-most candidate: the composer dialog is painted at the
+	// bottom, transcript echoes above it.
+	const box = boxes[boxes.length - 1];
+	// A live dialog is framed and carries a focus marker on one option row. The
+	// transcript echo (`╭─── Ask 1 questions ─…`, borderless option glyphs, no
+	// focus marker) and a dialog that has already closed are rejected here
+	// rather than answered blind.
+	if (box.options.length === 0 || box.focusRow < 0 || box.framedRows === 0) return null;
+	const prompt = box.header.length > 0 ? box.header[box.header.length - 1] : "";
+	const multi = /\btoggle\b/.test(box.help) || box.options.filter(option => option.checked).length > 1;
+	return {
+		kind: "question",
+		toolName: "ask",
+		body: "",
+		prompt,
+		multi,
+		focusedIndex: box.focusRow,
+		checked: [...box.checked],
+		options: box.options.map(option => ({ label: option.label })),
+	};
+}
+
+/**
+ * Parse every `Ask` box in the pane: its header lines, option rows, focus
+ * marker, key-hint bar, and whether its rows were framed by `│` borders. The
+ * caller decides which box (if any) is a live dialog.
+ */
+function readAskBoxes(lines) {
+	const boxes = [];
+	for (let start = 0; start < lines.length; start++) {
+		if (!/^[╭┌][─\s]*(?:\S+\s+)?Ask\b/.test(lines[start].trim())) continue;
+		// Layout (verified live on 18.8.9):
+		//   ╭─── Ask ──…╮
+		//   │ <question text>                ← header/question
+		//   ├─…─┤                           ← rule before the option rows
+		//   │ <focus> <marker> <label>       ← one row per option
+		//   ├─…─┤
+		//   │ <key hints>
+		//   ╰─…─╯
+		const box = { header: [], options: [], checked: new Set(), focusRow: -1, help: "", framedRows: 0 };
+		let rowIndex = -1;
+		for (let index = start + 1; index < lines.length; index++) {
+			const trimmed = lines[index].trim();
+			if (/^[╰└]/.test(trimmed)) break;
+			const framed = /^[│|]/.test(trimmed);
+			if (framed) box.framedRows++;
+			const content = framed
+				? trimmed.replace(/^[│|]\s?/, "").replace(/\s?[│|]$/, "").trimEnd().trim()
+				: trimmed;
+			if (!content || /^[├┝]/.test(trimmed)) continue;
+			// An option row: `<focus> <marker> <label>`. The marker glyph differs
+			// between Nerd Font revisions (U+F096, U+F10C, U+F046, U+F14A have all
+			// been observed live), so accept any private-use/box glyph immediately
+			// before the label rather than enumerating them.
+			const option = content.match(/^([\uf054\u276f\u25b6\s]*)([\uE000-\uF8FF\u25a0-\u25ff\u2600-\u27bf])\s*(.+?)\s*$/u);
+			if (option && option[3] && framed) {
+				const label = option[3];
+				// The `Other (type your own)` row is the free-text affordance, not
+				// one of the offered options.
+				if (/^Other \(type your own\)$/.test(label)) continue;
+				// A filled marker means checked; U+F14A is the Nerd Font checked
+				// box, U+F046/U+F10C the empty ones.
+				const checkedMarker = option[2] === "\uf14a" || option[2] === "\u2611" || option[2] === "\u25cf";
+				if (checkedMarker) box.checked.add(box.options.length);
+				rowIndex++;
+				if (option[1].includes("\uf054") || option[1].includes("\u276f") || option[1].includes("\u25b6")) box.focusRow = rowIndex;
+				box.options.push({ label, checked: checkedMarker });
+				continue;
+			}
+			if (box.options.length === 0) box.header.push(content);
+			// The key-hint bar names the interaction: multi-select says `toggle`,
+			// single-select says `select`. The marker glyph alone cannot tell them
+			// apart (both render U+F096 when unchecked).
+			else if (/\b(toggle|select|submit)\b/.test(content)) box.help = content;
+		}
+		boxes.push(box);
 	}
-	return -1;
+	return boxes;
+}
+
+/** Resolve a dictated answer to an option index: label match, then 1-based number. */
+function resolveRequestedIndex(text, options) {
+	if (!text) return -1;
+	const byLabel = options.findIndex(option => option.label.toLowerCase() === text.toLowerCase());
+	if (byLabel >= 0) return byLabel;
+	// Spelled-out numbers ("two") are as common as digits on the lens.
+	const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+	const numeric = /^\d+$/.test(text) ? Number(text) : words[text.toLowerCase()];
+	if (numeric >= 1 && numeric <= options.length) return numeric - 1;
+	const partial = options.findIndex(option => option.label.toLowerCase().includes(text.toLowerCase()));
+	return partial;
 }
 
 /** Every tmux pane currently hosting an interactive omp TUI. */

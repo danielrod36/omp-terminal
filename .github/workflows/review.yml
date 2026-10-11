@@ -25,7 +25,9 @@ concurrency:
 jobs:
   agent-review:
     runs-on: ubuntu-latest
-    # Skip unless a credential is present (see the step below for the variable).
+    # Fork PRs cannot read the repository's secrets, so the credential check
+    # below would always fail for them; skip early instead. Same-repository PRs
+    # proceed and the step below no-ops when no model key is configured.
     if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
     env:
       ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
@@ -57,9 +59,11 @@ jobs:
 
       - name: Collect the diff
         if: steps.creds.outputs.have == 'yes'
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
-          git fetch --no-tags origin "${{ github.event.pull_request.base.ref }}"
-          git diff "origin/${{ github.event.pull_request.base.ref }}...HEAD" > /tmp/pr.diff
+          git fetch --no-tags origin "$BASE_REF"
+          git diff "origin/$BASE_REF...HEAD" > /tmp/pr.diff
           wc -l /tmp/pr.diff
 
       - name: Review

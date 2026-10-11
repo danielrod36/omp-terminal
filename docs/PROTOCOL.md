@@ -252,9 +252,25 @@ Verified live: a tmux pane whose `pane_current_command` is `omp` hosts the TUI.
 
 - Prompt injection: `tmux send-keys -t <session> -l '<text>'` then `Enter`.
 - The approval menu renders as a bordered box headed `Allow tool: <name>` with an
-  `❯ Approve` / `Deny` list; `Enter` approves, `Down`+`Enter` denies.
+  `Approve` / `Deny` list and a `\uf054` focus marker on the highlighted row;
+  `Enter` submits the highlighted row, `Down`/`Up` move it.
+- An `ask` renders as a bordered `╭─ Ask ─…` box: the question, then one row per
+  option as `\uf054 \uf10c <label>`. `\uf054` is the focus marker; the option
+  marker is a private-use glyph that differs between Nerd Font revisions
+  (`U+F096`, `U+F10C` both observed live), so the parser accepts any
+  private-use/box glyph rather than enumerating them.
+- The dialog's key-hint bar distinguishes the two modes: `toggle` for
+  multi-select, `select` for single-select — both draw the same marker when
+  unchecked, so the hint bar is the only reliable signal.
+- Answering single-select is `Down`/`Up` to the row, then `Enter`. Multi-select
+  toggles the focused row with `Space` and submits with `Enter`.
+- A closed dialog leaves a borderless echo box in the transcript (`╭─── Ask 1
+  questions ─…`). It is not a live dialog: it has no focus marker and no framed
+  option rows, and the parser requires both.
 - Reads come from the transcript the TUI appends to, located via
-  `pane_current_path` → `<sessionsRoot>/<encoded-cwd>/`.
+  `pane_current_path` → `<sessionsRoot>/<encoded-cwd>/`. Line offsets are bytes
+  (the transcript can contain non-ASCII), and a fresh assistant record is
+  rewound to so a turn finishing around a transcript swap still paints.
 
 The bridge never owns the process in this mode: the desk agent stays the sole
 writer of the transcript.

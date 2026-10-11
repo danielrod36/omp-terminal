@@ -7,11 +7,11 @@ const log = createLogger("sessions");
 /**
  * Session discovery over omp's own transcript store.
  *
- * Layout verified against omp v18.8.7 (`src/session/session-paths.ts`,
- * `src/session/session-manager.ts`):
+ * Layout verified against omp v18.8.9 (`src/session/session-paths.ts`):
  *   <sessionsRoot>/<encoded-cwd>/*.jsonl
- * where cwd is home-relative (`-Work` for `~/Work`), tmp-relative under
- * `/tmp`, or the absolute path with separators encoded as `-`.
+ * where cwd is home-relative (`-Work` for `~/Work`), tmp-relative under the
+ * temp root (`-tmp-x` for `/tmp/x`), and otherwise the legacy absolute form
+ * (`--var-tmp-proj--` for `/var/tmp/proj`).
  * Each file's first two lines are a `title` record and a `session` record
  * carrying `id` and `cwd`.
  */
@@ -211,7 +211,10 @@ export function findOmpSession(config, idOrPath) {
 	}
 	const root = config.sessionsRoot;
 	if (!existsSync(root)) return null;
-	let prefixMatch = null;
+	// Prefix matching follows omp's `--resume` semantics and needs enough
+	// characters to be meaningful; shorter inputs are only ever exact matches.
+	const allowPrefix = idOrPath.length >= 6;
+	const prefixMatches = [];
 	for (const dirName of readdirSync(root)) {
 		const dir = join(root, dirName);
 		let entries;
@@ -232,17 +235,16 @@ export function findOmpSession(config, idOrPath) {
 				const head = parseHead(file);
 				if (head.sessionId === idOrPath) return { ...head, path: file };
 				// The file name matched but the head disagrees (an odd/truncated
-				// transcript): fall through and keep scanning for a clean match.
-				if (!prefixMatch && head.sessionId && head.sessionId.startsWith(idOrPath)) prefixMatch = { ...head, path: file };
+				// transcript): keep scanning for a clean match.
 				continue;
 			}
-			if (idOrPath.length < 6 || !namedId.startsWith(idOrPath)) continue;
-			// Prefix hits are only safe when exactly one transcript matches.
-			if (prefixMatch) return null;
-			prefixMatch = { ...parseHead(file), path: file };
+			if (!allowPrefix || !namedId.startsWith(idOrPath)) continue;
+			prefixMatches.push({ ...parseHead(file), path: file });
 		}
 	}
-	return prefixMatch;
+	// Ambiguity must not depend on readdir order: collect every prefix hit and
+	// refuse when more than one transcript could be meant.
+	return prefixMatches.length === 1 ? prefixMatches[0] : null;
 }
 
 /**

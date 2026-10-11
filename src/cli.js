@@ -240,8 +240,16 @@ function loadDotEnv(path = ".env") {
 		const key = line.slice(0, eq).trim();
 		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
 		let value = line.slice(eq + 1).trim();
-		if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+		const quoted =
+			(value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"));
+		if (quoted) {
+			// A quoted value is taken verbatim: `#` inside it is content.
 			value = value.slice(1, -1);
+		} else {
+			// Unquoted values end at an inline comment, so `PORT=3456 # x` is a
+			// usable port rather than the string "3456 # x".
+			const comment = value.indexOf("#");
+			if (comment >= 0) value = value.slice(0, comment).trim();
 		}
 		if (process.env[key] === undefined) process.env[key] = value;
 	}

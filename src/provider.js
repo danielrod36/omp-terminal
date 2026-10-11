@@ -237,7 +237,9 @@ export class OwnedSession {
 
 	#handleDialog(frame) {
 		const { id, method } = frame;
-		this.pendingDialogs.set(id, frame);
+		// `cancel` settles a dialog omp already closed and must not be stored:
+		// it would sit in the map forever, since no answer ever removes it.
+		if (method !== "cancel") this.pendingDialogs.set(id, frame);
 		if (method === "select") {
 			const lines = String(frame.title ?? "").split("\n");
 			const toolName = lines[0]?.replace(/^Allow tool:\s*/, "") ?? "tool";

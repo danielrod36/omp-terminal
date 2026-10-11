@@ -57,9 +57,15 @@ omp v18.8.7, binary on `PATH`; source types from the packed npm tarball.
 |---|---|
 | Pane identifies an omp TUI | `tmux list-panes -F '#{pane_current_command}'` -> `omp` |
 | Prompt injection | `tmux send-keys -t <s> -l '<text>'` then separate `send-keys -t <s> Enter`; the trailing literal arg otherwise gets typed |
-| Approval box shape | live `capture-pane`: `╭─ Allow tool: write ─…` with `❯ Approve` / `Deny` |
+| Approval box shape | live `capture-pane` (18.8.9): `╭─ Allow tool: write ─…` with `U+F054 Approve` focused and `Deny` beneath |
 | `Enter` approves | live: file written after `Enter` |
+| `ask` dialog box | live `capture-pane` (18.8.9): `╭─ Ask ─…`, question row, then option rows `\uf054 \uf10c <label>`; markers are private-use glyphs that vary by Nerd Font revision (`U+F096`, `U+F10C` observed) |
+| Option focus marker | `\uf054` on the highlighted row; a live `Down` moves it |
+| Multi vs single `ask` | the key-hint bar says `toggle` for multi-select and `select` for single; both render the same marker glyph when unchecked |
+| Multi toggle | live: `Space` marks the row checked (`U+F14A`), `Enter` submits |
 | Transcript location | `<sessionsRoot>/<encoded-cwd>/*.jsonl`; `pane_current_path` -> encoded bucket |
+| Byte-exact rewind | transcript line offsets are bytes, not JS string indices; `#resumeOffset` scans the raw Buffer |
+| A closed dialog leaves an echo | the transcript keeps a borderless `╭─── Ask 1 questions ─…` box after the dialog closes; it must not be read as an open dialog (no `\uf054` focus row, no framed option rows) |
 
 ## Bridge self-test
 
