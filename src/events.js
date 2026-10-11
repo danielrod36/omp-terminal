@@ -101,15 +101,16 @@ export function getMessages(sessionId, after) {
  * what the wearer saw, so it answers in the meantime.
  */
 export function historyFromRing(sessionId, limit = 10) {
+	// `emit` writes each message into every ring in the equivalence class, so
+	// concatenating the class would return every turn as many times as the class
+	// has ids. Read the primary ring only; the aliases hold the same entries.
+	const session = sessions.get(sessionId);
+	if (!session) return [];
 	const items = [];
-	for (const targetId of idClass(sessionId)) {
-		const session = sessions.get(targetId);
-		if (!session) continue;
-		for (const entry of session.messages) {
-			const message = entry.message;
-			if (message.type === "user_prompt" && message.text) items.push({ role: "user", text: message.text });
-			else if (message.type === "result" && message.text) items.push({ role: "assistant", text: message.text });
-		}
+	for (const entry of session.messages) {
+		const message = entry.message;
+		if (message.type === "user_prompt" && message.text) items.push({ role: "user", text: message.text });
+		else if (message.type === "result" && message.text) items.push({ role: "assistant", text: message.text });
 	}
 	return items.slice(-limit);
 }

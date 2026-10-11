@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 import { URL } from "node:url";
 import { createLogger, redactToken } from "./log.js";
@@ -11,6 +12,9 @@ import { findOmpSession, listOmpSessions, ompHistory } from "./sessions.js";
 
 const log = createLogger("http");
 const run = promisify(execFile);
+const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const pkgName = pkg.name;
+const pkgVersion = pkg.version;
 
 const JSON_HEADERS = { "Content-Type": "application/json; charset=utf-8" };
 
@@ -25,7 +29,11 @@ async function readJson(req) {
 	let total = 0;
 	for await (const chunk of req) {
 		total += chunk.length;
-		if (total > 10 * 1024 * 1024) throw new Error("request body too large");
+		if (total > 10 * 1024 * 1024) {
+			const error = new Error("request body too large");
+			error.statusCode = 413;
+			throw error;
+		}
 		chunks.push(chunk);
 	}
 	if (chunks.length === 0) return {};
@@ -53,7 +61,10 @@ export function createBridge(config) {
 			ompVersion = stdout.trim().replace(/^omp\//, "") || null;
 		} catch (error) {
 			log.warn(`could not resolve omp version: ${error.message}`);
-			ompVersion = null;
+			// Cache only a successful resolution: a probe that failed because omp
+			// was momentarily unavailable must not pin "unknown" for the process
+			// lifetime.
+			return null;
 		}
 		return ompVersion;
 	}
@@ -77,6 +88,21 @@ export function createBridge(config) {
 		return canonical ? sessions.get(canonical) ?? null : null;
 	}
 
+	/** A session whose child exited is dead weight: drop it so a re-prompt respawns. */
+	function isDead(session) {
+		if (session instanceof OwnedSession) return session.rpc?.closed === true;
+		return session.paneGone === true;
+	}
+
+	function dropIfDead(session) {
+		if (!session || !isDead(session)) return session;
+		sessions.delete(session.id);
+		for (const [alias, canonical] of sessionAliases) {
+			if (canonical === session.id) sessionAliases.delete(alias);
+		}
+		return null;
+	}
+
 	/** Attach-mode sessions keyed by tmux session name, so one pane maps to one bridge session. */
 	const attachRegistry = new Map(); // tmuxSession -> AttachSession
 
@@ -88,9 +114,11 @@ export function createBridge(config) {
 	function ensureAttached(entry) {
 		const existing = attachRegistry.get(entry.attach.tmuxSession);
 		if (existing) {
-			if (!existing.transcriptPath && entry.attach.transcriptPath) {
-				existing.transcriptPath = entry.attach.transcriptPath;
-			}
+			// The pane may have started a NEW transcript since the attachment was
+			// created (a fresh TUI writes nothing until its first turn). Refreshing
+			// here is what keeps the answer stream pointed at the file the desk is
+			// actually appending to; a stale binding silently delivers nothing.
+			if (entry.attach.transcriptPath) existing.adoptTranscript(entry.attach.transcriptPath);
 			return existing;
 		}
 		const session = new AttachSession({
@@ -112,8 +140,9 @@ export function createBridge(config) {
 
 	/** Owned session for a session id, spawning omp on first use. */
 	async function ensureOwned(sessionId, { cwd, resumePath } = {}) {
+		dropIfDead(getLive(sessionId));
 		const existing = getLive(sessionId);
-		if (existing && !(existing instanceof OwnedSession && existing.rpc?.closed)) return existing;
+		if (existing) return existing;
 		if (pendingSpawns.has(sessionId)) return pendingSpawns.get(sessionId);
 		const spawnPromise = (async () => {
 			const found = resumePath ?? findOmpSession(config, sessionId)?.path ?? null;
@@ -159,11 +188,19 @@ export function createBridge(config) {
 	 * owned `omp --mode rpc-ui` child, resuming the transcript when one exists.
 	 */
 	async function resolveTarget(sessionId, { cwd } = {}) {
-		const live = getLive(sessionId);
+		const live = dropIfDead(getLive(sessionId));
 		if (live) return live;
 		if (config.attach) {
 			const attached = await findAttachEntry(sessionId);
 			if (attached) return ensureAttached(attached);
+		}
+		if (typeof sessionId === "string" && sessionId.startsWith("tmux:")) {
+			// An explicit attach id names a desk pane, not a transcript. If that
+			// pane is gone, spawning an owned child would silently switch the
+			// wearer to a different session than the one they picked.
+			const error = new Error(`tmux session '${sessionId.slice(5)}' is not running`);
+			error.statusCode = 404;
+			throw error;
 		}
 		return ensureOwned(sessionId, { cwd });
 	}
@@ -175,6 +212,7 @@ export function createBridge(config) {
 	}
 
 	async function listSessions({ cwd, limit }) {
+		for (const session of [...sessions.values()]) dropIfDead(session);
 		const live = [...sessions.values()].map(session => ({
 			id: session.id,
 			title: session.title || "omp session",
@@ -185,7 +223,8 @@ export function createBridge(config) {
 			...(session.tmuxSession ? { attach: { tmuxSession: session.tmuxSession, transcriptPath: session.transcriptPath } } : {}),
 		}));
 		const attached = config.attach ? await listTmuxOmpSessions(config) : [];
-		const disk = listOmpSessions(config, { limit }).map(session => ({
+		const diskAll = listOmpSessions(config, { limit });
+		const disk = diskAll.map(session => ({
 			id: session.id,
 			title: session.title,
 			timestamp: session.timestamp,
@@ -195,28 +234,44 @@ export function createBridge(config) {
 		}));
 		const seen = new Set();
 		const merged = [];
-		// Live bridge sessions take priority; the tmux panes that back them merge
-		// by tmux name; remaining on-disk transcripts fill in the rest.
-		for (const session of [...live, ...attached, ...disk]) {
-			const key = session.attach ? `tmux:${session.attach.tmuxSession}` : session.id;
-			if (seen.has(key)) continue;
-			seen.add(key);
+		// Live bridge sessions take priority; a tmux pane merges with the on-disk
+		// transcript it is appending to (one desk conversation must appear once),
+		// and remaining on-disk transcripts fill in the rest.
+		const rows = [...live, ...attached, ...disk.map((session, index) => ({ ...session, path: diskAll[index].path }))];
+		for (const session of rows) {
+			const keys = sessionKeys(session);
+			if (keys.some(key => seen.has(key))) continue;
+			for (const key of keys) seen.add(key);
 			merged.push(session);
 		}
 		const filtered = cwd ? merged.filter(session => session.cwd === cwd) : merged;
 		return filtered.slice(0, limit);
 	}
 
+	/** Identity keys for one session row: its id, tmux name, and transcript path. */
+	function sessionKeys(session) {
+		const keys = [`id:${session.id}`];
+		if (session.attach) {
+			keys.push(`tmux:${session.attach.tmuxSession}`);
+			if (session.attach.transcriptPath) keys.push(`path:${session.attach.transcriptPath}`);
+		}
+		if (session.path) keys.push(`path:${session.path}`);
+		return keys;
+	}
+
 	const server = createServer(async (req, res) => {
 		const started = Date.now();
 		res.on("finish", () => {
-			log.info(`${req.socket.remoteAddress} ${res.statusCode} ${req.method} ${redactToken(req.url)} ${Date.now() - started}ms`);
+			// The socket can already be gone when the client aborts mid-body
+			// (e.g. after an early 413), so it is not safe to assume it exists.
+			log.info(`${req.socket?.remoteAddress ?? "-"} ${res.statusCode} ${req.method} ${redactToken(req.url)} ${Date.now() - started}ms`);
 		});
 		try {
 			await route(req, res);
 		} catch (error) {
-			log.error(`unhandled route error: ${error.message}`);
-			if (!res.headersSent) sendJson(res, 500, { error: error.message });
+			const status = typeof error.statusCode === "number" ? error.statusCode : 500;
+			if (status >= 500) log.error(`unhandled route error: ${error.message}`);
+			if (!res.headersSent) sendJson(res, status, { error: error.message });
 			else res.end();
 		}
 	});
@@ -225,24 +280,26 @@ export function createBridge(config) {
 		const url = new URL(req.url, "http://localhost");
 		const path = url.pathname;
 
-		if (config.allowCors && req.method === "OPTIONS") {
-			res.writeHead(204, {
-				"Access-Control-Allow-Origin": "*",
-				"Access-Control-Allow-Headers": "authorization, content-type, last-event-id",
-				"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-			});
-			return res.end();
+		if (config.allowCors) {
+			// Preflight AND real responses need the header: a browser discards a
+			// response whose ACAO is missing even when the preflight passed.
+			res.setHeader("Access-Control-Allow-Origin", "*");
+			res.setHeader("Access-Control-Allow-Headers", "authorization, content-type, last-event-id");
+			res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+			if (req.method === "OPTIONS") {
+				res.writeHead(204);
+				return res.end();
+			}
 		}
 
 		if (path === "/healthz") {
+			// Unauthenticated by design (the stock server mounts auth on /api
+			// only), so it must not hand out host paths or counters. Those live
+			// behind the token on /api/info.
 			return sendJson(res, 200, {
 				ok: true,
 				provider: config.providerLabel,
 				backend: config.backend,
-				ownedSessions: sessions.size,
-				sseClients: totalClients(),
-				sessionsRoot: config.sessionsRoot,
-				uptimeMs: Math.round(process.uptime() * 1000),
 			});
 		}
 
@@ -293,14 +350,17 @@ export function createBridge(config) {
 					expose: config.expose ?? "off",
 					backend: config.backend,
 					sessionsRoot: config.sessionsRoot,
+					ownedSessions: sessions.size,
+					sseClients: totalClients(),
+					uptimeMs: Math.round(process.uptime() * 1000),
 				},
 			});
 		}
 
 		if (req.method === "GET" && path === "/api/update-check") {
 			return sendJson(res, 200, {
-				packageName: "omp-terminal",
-				currentVersion: "0.1.0",
+				packageName: pkgName,
+				currentVersion: pkgVersion,
 				newestVersion: null,
 				updateAvailable: null,
 				checkedAt: new Date().toISOString(),
@@ -349,7 +409,7 @@ export function createBridge(config) {
 		if (req.method === "POST" && path === "/api/permission-response") {
 			const { sessionId, decision } = (await readJson(req)) ?? {};
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
-			const session = getLive(sessionId);
+			const session = dropIfDead(getLive(sessionId));
 			if (!session) return sendJson(res, 404, { error: "Session not found" });
 			const accepted = await session.answerPermission(decision || "deny");
 			if (!accepted) return sendJson(res, 400, { error: "No permission request is pending" });
@@ -361,7 +421,7 @@ export function createBridge(config) {
 			const { sessionId, answer } = body;
 			log.info(`question-response raw=${JSON.stringify(answer)?.slice(0, 200)} (sessionId=${sessionId ?? "-"})`);
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
-			const session = getLive(sessionId);
+			const session = dropIfDead(getLive(sessionId));
 			if (!session) return sendJson(res, 404, { error: "Session not found" });
 			const accepted = await session.answerQuestion(answer ?? "skip");
 			if (!accepted) return sendJson(res, 400, { error: "No question is pending" });
@@ -371,7 +431,7 @@ export function createBridge(config) {
 		if (req.method === "POST" && path === "/api/interrupt") {
 			const { sessionId } = (await readJson(req)) ?? {};
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
-			const session = getLive(sessionId);
+			const session = dropIfDead(getLive(sessionId));
 			if (!session) return sendJson(res, 404, { error: "Session not found" });
 			try {
 				await session.interrupt();
@@ -385,7 +445,7 @@ export function createBridge(config) {
 		if (req.method === "GET" && path === "/api/status") {
 			const sessionId = url.searchParams.get("sessionId");
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
-			const session = getLive(sessionId);
+			const session = dropIfDead(getLive(sessionId));
 			if (session) return sendJson(res, 200, { state: session.state, sessionId, provider: config.providerLabel });
 			const found = findOmpSession(config, sessionId);
 			if (!found) return sendJson(res, 404, { error: "Session not found" });
@@ -396,7 +456,7 @@ export function createBridge(config) {
 			const sessionId = url.searchParams.get("sessionId");
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
 			const after = Number(url.searchParams.get("after")) || 0;
-			const session = getLive(sessionId);
+			const session = dropIfDead(getLive(sessionId));
 			return sendJson(res, 200, {
 				messages: getMessages(sessionId, after),
 				state: session?.state ?? "idle",
