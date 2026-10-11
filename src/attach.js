@@ -47,11 +47,24 @@ export class AttachSession {
 		// not the bridge's to re-emit, and leaving `offset` at 0 would replay all
 		// of it to the lens on the first poll. When no path exists yet, resolution
 		// finds one and the same rule applies.
-		if (this.transcriptPath && existsSync(this.transcriptPath)) {
-			if (this.offset === 0) this.offset = statSync(this.transcriptPath).size;
-		} else {
-			this.#resolveTranscript();
+		//
+		// Every filesystem probe here is guarded: the file can be rotated away
+		// between `existsSync` and `statSync`, and a throw would escape before the
+		// poll timer is installed, leaving a session registered in
+		// `attachRegistry` that never polls again. Clearing the path lets the
+		// first poll re-resolve it.
+		if (this.transcriptPath) {
+			try {
+				if (!existsSync(this.transcriptPath)) {
+					this.transcriptPath = null;
+				} else if (this.offset === 0) {
+					this.offset = statSync(this.transcriptPath).size;
+				}
+			} catch {
+				this.transcriptPath = null;
+			}
 		}
+		if (!this.transcriptPath) this.#resolveTranscript();
 		this.timer = setInterval(() => this.#poll().catch(error => log.warn(`poll failed: ${error.message}`)), this.config.tailIntervalMs);
 		this.timer.unref?.();
 		return this;
@@ -156,8 +169,13 @@ export class AttachSession {
 		if (this.transcriptPath && existsSync(this.transcriptPath)) return;
 		const newest = newestTranscript(this.config, this.cwd);
 		if (!newest?.path) return;
-		this.transcriptPath = newest.path;
-		this.offset = statSync(newest.path).size;
+		try {
+			this.offset = statSync(newest.path).size;
+			this.transcriptPath = newest.path;
+		} catch {
+			// Rotated away between the listing and the probe; retry next poll.
+			return;
+		}
 		log.info(`attach ${this.id} resolved transcript ${newest.path}`);
 	}
 
@@ -182,7 +200,14 @@ export class AttachSession {
 
 	async #tailTranscript() {
 		if (!this.transcriptPath || !existsSync(this.transcriptPath)) return;
-		const size = statSync(this.transcriptPath).size;
+		let size;
+		try {
+			size = statSync(this.transcriptPath).size;
+		} catch {
+			// Rotated between the existence check and the probe; the next poll
+			// re-resolves.
+			return;
+		}
 		if (size <= this.offset) {
 			if (size < this.offset) this.offset = size; // truncated/rotated
 			return;
@@ -619,30 +644,31 @@ function readAskBoxes(lines) {
 			if (/^[╰└]/.test(trimmed)) break;
 			const framed = /^[│|]/.test(trimmed);
 			if (framed) box.framedRows++;
+			// The row keeps its leading whitespace: the focus column is
+			// whitespace-delimited, so trimming here would erase the focus marker
+			// before it can be read. Only the trailing border and padding go.
 			const content = framed
-				? trimmed.replace(/^[│|]\s?/, "").replace(/\s?[│|]$/, "").trimEnd().trim()
+				? trimmed.replace(/^[│|]\s?/, "").replace(/\s?[│|]$/, "").trimEnd()
 				: trimmed;
-			if (!content || /^[├┝]/.test(trimmed)) continue;
-			// An option row: `<focus> <marker> <label>`. The marker glyph differs
-			// between Nerd Font revisions (U+F096, U+F10C, U+F046, U+F14A have all
-			// been observed live), so accept any single private-use/box glyph
-			// before the label rather than enumerating them. The label is required
-			// to start with a non-marker character so a label that itself contains
-			// a PUA glyph is not truncated.
-			const option = content.match(
-				/^([\uf054\u276f\u25b6\s]*)([\uE000-\uF8FF\u25a0-\u25ff\u2600-\u27bf])\s+([^\uE000-\uF8FF\u25a0-\u25ff\u2600-\u27bf].*?)\s*$/u,
-			);
-			if (option && option[3] && framed) {
-				const label = option[3];
+			if (!content.trim() || /^[├┝]/.test(trimmed)) continue;
+			// An option row: an optional focus glyph, then the marker glyph, then
+			// the label. Parsing by structure (`focus? marker label`) rather than by
+			// "a glyph the label cannot start with" keeps labels that themselves
+			// begin with a glyph (`● Low quality`) intact. When the character after
+			// the marker is itself a glyph it is part of the label, because the
+			// marker is exactly one character wide.
+			const row = framed ? splitOptionRow(content) : null;
+			if (row && row.label && isMarker(row.marker)) {
+				const label = row.label;
 				// The `Other (type your own)` row is the free-text affordance, not
 				// one of the offered options.
 				if (/^Other \(type your own\)$/.test(label)) continue;
 				// A filled marker means checked; U+F14A is the Nerd Font checked
 				// box, U+F046/U+F10C the empty ones.
-				const checkedMarker = option[2] === "\uf14a" || option[2] === "\u2611" || option[2] === "\u25cf";
+				const checkedMarker = row.marker === "\uf14a" || row.marker === "\u2611" || row.marker === "\u25cf";
 				if (checkedMarker) box.checked.add(box.options.length);
 				rowIndex++;
-				if (option[1].includes("\uf054") || option[1].includes("\u276f") || option[1].includes("\u25b6")) box.focusRow = rowIndex;
+				if (row.focus) box.focusRow = rowIndex;
 				box.options.push({ label, checked: checkedMarker });
 				continue;
 			}
@@ -658,26 +684,69 @@ function readAskBoxes(lines) {
 }
 
 /**
- * Resolve a dictated answer to an option index.
+ * Split one option row into focus / marker / label.
  *
- * Ordered by confidence: exact label, then a 1-based number (digit or word),
- * then a unique partial label. An ambiguous partial match resolves to nothing
- * rather than guessing — answering the wrong option is worse than declining.
+ * The row is `<focus glyph>? <marker glyph> <label>`. Whitespace is not a
+ * reliable focus signal: omp trims the leading padding, so a focused row can
+ * begin at column 0 while an unfocused one starts with spaces — and which of
+ * those happens depends on the terminal width, not on the state. The focus
+ * glyph set is therefore what decides, and the marker is the next character
+ * after it. A label that itself begins with a glyph is preserved because only
+ * the single marker character is consumed.
+ */
+function splitOptionRow(content) {
+	const text = content.replace(/^\s+/, "");
+	if (!text) return null;
+	const focused = FOCUS.test(text[0]) ? text[0] : null;
+	const afterFocus = focused ? text.slice(1).replace(/^\s+/, "") : text;
+	if (!afterFocus) return null;
+	return { focus: focused, marker: afterFocus[0], label: afterFocus.slice(1).trim() };
+}
+
+const FOCUS = /[\uf054\u276f\u25b6]/;
+
+/** True for the glyphs omp uses as option markers (Nerd Font radio/checkbox). */
+function isMarker(glyph) {
+	if (!glyph) return false;
+	const code = glyph.codePointAt(0);
+	return (code >= 0xe000 && code <= 0xf8ff) || (code >= 0x25a0 && code <= 0x25ff) || (code >= 0x2600 && code <= 0x27bf);
+}
+
+/** Resolve a dictated answer to an option index.
+ *
+ * Ordered by confidence: exact label, then a number named anywhere in the
+ * dictation ("2", "two", "option 2", "number two"), then a unique word-boundary
+ * partial label. An ambiguous or too-short partial resolves to nothing rather
+ * than guessing — answering the wrong option is worse than declining.
  */
 function resolveRequestedIndex(text, options) {
 	if (!text) return -1;
-	const lowered = text.toLowerCase();
+	const lowered = text.toLowerCase().trim();
+	if (!lowered) return -1;
+	// 1. The dictation IS a label (including a label like "Option 2").
 	const byLabel = options.findIndex(option => option.label.toLowerCase() === lowered);
 	if (byLabel >= 0) return byLabel;
-	// Spelled-out numbers ("two") are as common as digits on the lens.
+	// 2. A number token anywhere in the dictation, 1-based. The pre-PR code
+	// stripped every non-digit, so "option 2" resolved; bare-word dictations
+	// ("two") must keep working too.
+	const digits = lowered.match(/\d+/);
 	const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
-	const numeric = /^\d+$/.test(text) ? Number(text) : words[lowered];
+	const wordMatch = lowered.split(/[^a-z]+/).find(token => token in words);
+	const numeric = digits ? Number(digits[0]) : wordMatch ? words[wordMatch] : NaN;
 	if (Number.isInteger(numeric) && numeric >= 1 && numeric <= options.length) return numeric - 1;
-	const partials = [];
-	options.forEach((option, index) => {
-		if (option.label.toLowerCase().includes(lowered)) partials.push(index);
-	});
-	return partials.length === 1 ? partials[0] : -1;
+	// 3. A unique partial label, but only on a word boundary and long enough to
+	// be meaningful: a two-character misrecognition must not silently answer.
+	if (lowered.length >= 3) {
+		const partials = [];
+		options.forEach((option, index) => {
+			const label = option.label.toLowerCase();
+			if (label.startsWith(lowered) || label.split(/[^a-z0-9]+/).some(token => token.startsWith(lowered))) {
+				partials.push(index);
+			}
+		});
+		if (partials.length === 1) return partials[0];
+	}
+	return -1;
 }
 
 /** Every tmux pane currently hosting an interactive omp TUI. */
