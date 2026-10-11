@@ -229,10 +229,11 @@ export function listOmpSessions(config, { limit = 50 } = {}) {
  * timestamp containing that digit, so a typo resumed and exposed an unrelated
  * transcript. Ambiguity resolves to `null` rather than guessing.
  *
- * A `null` means "no such session". A scan that could not complete (the root
- * vanished, EMFILE, EACCES) is never reported as `null`: callers treat a miss as
- * "start fresh", so a transient failure must not silently drop a resume. It
- * throws a tagged error instead, which callers surface or retry.
+ * A `null` means "no such session", which callers read as "start fresh". Two
+ * cases reach it: the root or the id is genuinely absent, and the scan is
+ * ambiguous. A scan that could not *complete* (EMFILE/ENFILE/EACCES) is never
+ * reported as `null` — that would silently drop a resume the wearer expected to
+ * find; it throws a tagged error instead, which callers surface or retry.
  */
 export function findOmpSession(config, idOrPath) {
 	if (!idOrPath) return null;

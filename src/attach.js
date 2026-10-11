@@ -621,12 +621,12 @@ function readAskFromPane(lines) {
 	if (box.options.length === 0 || box.focusRow < 0 || box.framedRows === 0) return null;
 	const prompt = box.header.length > 0 ? box.header[box.header.length - 1] : "";
 	// Multi-select signals, in order of reliability: the key-hint bar says
-	// `toggle`; more than one option is checked; or the header carries a `Submit`
-	// affordance (multi dialogs render `<id>  Submit`, single-select ones have no
-	// header line at all — measured live on both shapes). Without a fallback, a
-	// truncated or reworded hint bar routes a multi dialog to the single-select
-	// path, which submits without toggling and silently drops the answer.
-	const headerSubmit = box.header.some(line => /\bSubmit\b/.test(line));
+	// `toggle`; more than one option is checked; or the dialog carries the multi
+	// header affordance. That affordance is the FIRST header line of a two-line
+	// header (`<id>  Submit` above the question) — single-select dialogs have a
+	// one-line header holding only the question — so a question that merely
+	// mentions the word "Submit" cannot promote a single-select dialog.
+	const headerSubmit = box.header.length >= 2 && /\bSubmit\b/.test(box.header[0]);
 	const multi = /\btoggle\b/.test(box.help) || box.options.filter(option => option.checked).length > 1 || headerSubmit;
 	return {
 		kind: "question",
@@ -651,46 +651,44 @@ function readAskBoxes(lines) {
 		if (!/^[╭┌][─\s]*(?:\S+\s+)?Ask\b/.test(lines[start].trim())) continue;
 		// Layout (verified live on 18.8.9):
 		//   ╭─── Ask ──…╮
-		//   │ <question text>                ← header/question
-		//   ├─…─┤                           ← rule before the option rows
+		//   │ <question id>  <Submit>        ← header (multi only)
+		//   │ <question text>                ← header
+		//   ├─…─┤                           ← rule 1: options begin
 		//   │ <focus> <marker> <label>       ← one row per option
-		//   ├─…─┤
+		//   ├─…─┤                           ← rule 2: options end
 		//   │ <key hints>
 		//   ╰─…─╯
-		const box = { header: [], options: [], checked: new Set(), focusRow: -1, help: "", framedRows: 0, closed: false };
-		let rowIndex = -1;
+		// Sections are delimited by the rules themselves rather than inferred from
+		// content: a header line that happens to start with a private-use glyph can
+		// then never be mistaken for an option, and the option block cannot be
+		// "closed early" by one.
+		const box = { header: [], options: [], checked: new Set(), focusRow: -1, help: "", framedRows: 0 };
+		let rules = 0;
 		for (let index = start + 1; index < lines.length; index++) {
 			const trimmed = lines[index].trim();
 			if (/^[╰└]/.test(trimmed)) break;
 			const framed = /^[│|]/.test(trimmed);
 			if (framed) box.framedRows++;
-			// Option rows live between the two `├` rules (question above, key hints
-			// below). Once the option block has closed, a framed row is the key-hint
-			// bar — record it for the toggle/select signal, but never parse it as an
-			// option, so a hint row beginning with a PUA icon cannot phantom-shift
-			// the option list.
 			if (/^[├┝]/.test(trimmed)) {
-				if (box.options.length > 0) box.closed = true;
+				rules++;
 				continue;
 			}
-			if (box.closed) {
-				const hint = trimmed.replace(/^[│|]\s?/, "").replace(/\s?[│|]$/, "").trim();
-				if (/\b(toggle|select|submit)\b/.test(hint)) box.help = hint;
-				continue;
-			}
-			// The row keeps its leading whitespace: the focus column is
-			// whitespace-delimited, so trimming here would erase the focus marker
-			// before it can be read. Only the trailing border and padding go.
 			const content = framed
 				? trimmed.replace(/^[│|]\s?/, "").replace(/\s?[│|]$/, "").trimEnd()
 				: trimmed;
 			if (!content.trim()) continue;
-			// An option row: an optional focus glyph, then the marker glyph, then
-			// the label. Parsing by structure (`focus? marker label`) rather than by
-			// "a glyph the label cannot start with" keeps labels that themselves
-			// begin with a glyph (`● Low quality`) intact. When the character after
-			// the marker is itself a glyph it is part of the label, because the
-			// marker is exactly one character wide.
+			// After the closing rule: key hints only, never an option row.
+			if (rules >= 2) {
+				if (/\b(toggle|select|submit|mark)\b/.test(content)) box.help = content;
+				continue;
+			}
+			// Before the opening rule: the header (question id + question text).
+			if (rules === 0) {
+				box.header.push(content.trim());
+				continue;
+			}
+			// Between the rules: the option rows. The row keeps its leading
+			// whitespace because the focus column is whitespace-delimited.
 			const row = framed ? splitOptionRow(content) : null;
 			if (row && row.label && isMarker(row.marker)) {
 				const label = row.label;
@@ -701,12 +699,9 @@ function readAskBoxes(lines) {
 				// U+F096 (measured live: toggling a row with Space swaps those two).
 				const checkedMarker = row.marker === "\uf14a";
 				if (checkedMarker) box.checked.add(box.options.length);
-				rowIndex++;
-				if (row.focus) box.focusRow = rowIndex;
+				if (row.focus) box.focusRow = box.options.length;
 				box.options.push({ label, checked: checkedMarker });
-				continue;
 			}
-			if (box.options.length === 0) box.header.push(content);
 		}
 		boxes.push(box);
 	}
@@ -768,11 +763,15 @@ function resolveRequestedIndex(text, options) {
 	// 2. A label match on TOKENS, checked before any bare number: a dictation that
 	// names a digit-containing label ("http 2" for `HTTP/2`) must not be read as a
 	// row number and answer a different option. The dictation's tokens must form a
-	// prefix of the label's tokens (so "http 2" ⇒ ["http","2"] matches HTTP/2), and
-	// the first token needs 3+ characters so a short misrecognition resolves to
-	// nothing rather than guessing.
+	// prefix of the label's tokens.
+	//
+	// The length gate applies only to a SINGLE short token: "s"/"ow" is a
+	// misrecognition and must not auto-submit, but a multi-token dictation
+	// ("ai agents", "os versions") is specific enough to match whatever the first
+	// token's length.
+	const specific = tokens.length >= 2 || (tokens[0]?.length ?? 0) >= 3;
 	const partials = [];
-	if (tokens.length > 0 && tokens[0].length >= 3) {
+	if (specific) {
 		options.forEach((option, index) => {
 			const labelTokens = option.label.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
 			if (tokens.length > labelTokens.length) return;
