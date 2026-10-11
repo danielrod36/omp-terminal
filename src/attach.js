@@ -620,7 +620,14 @@ function readAskFromPane(lines) {
 	// rather than answered blind.
 	if (box.options.length === 0 || box.focusRow < 0 || box.framedRows === 0) return null;
 	const prompt = box.header.length > 0 ? box.header[box.header.length - 1] : "";
-	const multi = /\btoggle\b/.test(box.help) || box.options.filter(option => option.checked).length > 1;
+	// Multi-select signals, in order of reliability: the key-hint bar says
+	// `toggle`; more than one option is checked; or the header carries a `Submit`
+	// affordance (multi dialogs render `<id>  Submit`, single-select ones have no
+	// header line at all — measured live on both shapes). Without a fallback, a
+	// truncated or reworded hint bar routes a multi dialog to the single-select
+	// path, which submits without toggling and silently drops the answer.
+	const headerSubmit = box.header.some(line => /\bSubmit\b/.test(line));
+	const multi = /\btoggle\b/.test(box.help) || box.options.filter(option => option.checked).length > 1 || headerSubmit;
 	return {
 		kind: "question",
 		toolName: "ask",
