@@ -216,6 +216,19 @@ Answer with `{"type":"extension_ui_response","id":"…","value":"Approve"}`.
 The `title` carries the stock "Allow tool: …" body, so it maps straight onto the
 Even `permission_request` frame's `description`/`detail`.
 
+`options` is `string[]` — plain labels, not objects — and the reply is the chosen
+LABEL, which omp tests as `value === "Approve"` (read off the shipped 18.10.1
+binary: `N.select(<Allow tool: …>, ["Approve","Deny"])`). The Even frame's `options`
+carry `{text, key}` instead, where `key` stays the stock `allow`/`allowAlways`/`deny`
+decision and `text` must be the label the wearer answered with, so the announce
+mirrors the card's own rows rather than a fixed `Yes`/`No`. Verified end to end:
+answering `allow` runs the gated tool (`test/live-permission.mjs`).
+
+Do not confuse this with the option IDs `allow_once`/`allow_always`/`reject_once`/
+`reject_always`. Those belong to a different path — a host `requestPermission` hook
+that resolves the reply through a registry and throws `Tool permission response used
+unknown option ID` — and are not what the rpc-ui `select` dialog offers.
+
 An `ask` question arrives as `method:"ask"` (**only after the host opts in with
 `{"type":"set_ask_dialog","enabled":true}`**; otherwise the tool degrades to
 `select`/`editor` dialogs). Answer with:
