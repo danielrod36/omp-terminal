@@ -255,8 +255,15 @@ export function createBridge(config) {
 			// canonical id the incumbent is stored under.
 			const incumbent = sessions.get(session.id);
 			if (incumbent && incumbent !== session) {
-				session.kill();
-				return incumbent;
+				// The incumbent may have exited during our `start()`: adopting it would kill the
+				// healthy child we just started AND wedge every prompt on "omp process is
+				// closed", so a dead one is evicted and ours is kept instead.
+				if (isDead(incumbent)) {
+					dropIfDead(incumbent);
+				} else {
+					session.kill();
+					return incumbent;
+				}
 			}
 			sessions.set(session.id, session);
 			if (clientId && clientId !== session.id) sessions.delete(clientId);
