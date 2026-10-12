@@ -126,6 +126,28 @@ console.log("pane scraping");
 			JSON.stringify(w?.options.map(o => o.label)) === JSON.stringify(["Approve", "Deny"]),
 			JSON.stringify(w?.options.map(o => o.label)));
 
+		// `Approve`/`Deny` is the card's own vocabulary and `Yes`/`No` is what a body line looks
+		// like. Taking the pair nearest the hint bar let a body Yes/No below the real choices
+		// displace them, so a dictated "allow" pressed `Yes` instead of Approve.
+		const bothPairs = card([
+			"│  \uf054 Approve                                                                   │",
+			"│    Deny                                                                      │",
+			"│ Yes                                                                          │",
+			"│ No                                                                           │",
+			"│ ↑/↓ navigate  󰌑 select  󱊷 cancel                                             │",
+		]);
+		const bp = readDialogFromPane(bothPairs);
+		check("Approve/Deny wins over a body Yes/No pair",
+			JSON.stringify(bp?.options.map(o => o.label)) === JSON.stringify(["Approve", "Deny"]) && bp?.focusedIndex === 0,
+			JSON.stringify(bp?.options.map(o => o.label)) + " focus=" + bp?.focusedIndex);
+
+		// An unfocused lone row must not fabricate focus 0: a dictated deny would then submit it.
+		const lone = card(["│ Approve                                                                    │", "│ ↑/↓ navigate  󰌑 select  󱊷 cancel                                             │"]);
+		const lo = readDialogFromPane(lone);
+		check("an unfocused lone row is not answerable",
+			(lo?.options ?? []).length === 0,
+			JSON.stringify(lo?.options.map(o => o.label)));
+
 		// A genuine Yes/No card must still parse.
 		const yesNo = card([
 			"│ Continue?                                                                    │",

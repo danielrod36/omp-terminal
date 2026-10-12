@@ -11,10 +11,15 @@ const run = promisify(execFile);
 
 /**
  * Most bytes of an unterminated trailing transcript line to keep re-reading between polls.
+ *
  * A trailing fragment is deliberately left unconsumed so a record still being flushed is not
- * dropped, but re-reading it costs I/O proportional to the LINE, and real lines reach 1.9 MB.
+ * dropped, but re-reading it costs I/O proportional to the LINE rather than to the new bytes.
+ * The bound sits above the longest real line measured on this host (1 903 529 bytes across 354
+ * transcripts), because a cap below it would discard legitimate records rather than merely
+ * bound the re-read: the largest single-line records are tool results, which the wearer does
+ * see. 4 MiB leaves headroom without letting an unterminated line re-read without bound.
  */
-const MAX_CARRY_BYTES = 1024 * 1024;
+const MAX_CARRY_BYTES = 4 * 1024 * 1024;
 
 /**
  * Attach-to-live mode: steer an interactive omp TUI already running under tmux.
@@ -126,7 +131,7 @@ export class AttachSession {
 		// Only adopt a file this pane could be writing: same bucket as the cwd,
 		// and newer than what we are currently following.
 		if (!path.startsWith(`${this.config.sessionsRoot}/${sessionDirName(this.cwd)}/`)) return;
-		if (this.transcriptPath && existsSync(this.transcriptPath) && statSync(this.transcriptPath).mtimeMs > statSync(path).mtimeMs) return;
+		if (this.transcriptPath && this.#isOlderThan(path)) return;
 		// Resolve the new offset BEFORE committing the path: a file rotating away
 		// between the two would otherwise leave the new path with the old offset.
 		let offset;
@@ -281,7 +286,10 @@ export class AttachSession {
 				// than to the new bytes. Past the cap the fragment is given up as unparseable
 				// rather than re-read forever — it cannot be a record boundary we owe the wearer.
 				if (carry.length > MAX_CARRY_BYTES) {
-					log.warn(`transcript line exceeds ${MAX_CARRY_BYTES} bytes; skipping it`);
+					// Give up the fragment rather than re-read it forever. It is a real record being
+					// flushed, so say so: the wearer loses that turn's output and the log is the only
+					// place it would show.
+					log.warn(`transcript line exceeds ${MAX_CARRY_BYTES} bytes; dropping it`);
 					carry = Buffer.alloc(0);
 				}
 				this.offset = cursor - carry.length;
@@ -663,31 +671,65 @@ export function readDialogFromPane(pane) {
 			// whole run to be exactly two rows is what keeps a body line reading `Yes` that happens
 			// to sit directly above the choices from joining them — the misfire this branch exists to
 			// prevent — while still leaving the card answerable in that case.
+			// Prefer the card's OWN vocabulary. `Approve`/`Deny` IS the permission menu — verified
+			// live on 18.8.9 — while `Yes`/`No` is what a body line looks like (a command, a diff, a
+			// preview). A body pair sitting nearest the hint bar therefore used to displace the real
+			// menu, and a dictated "allow" then pressed `Yes`, a different row. The Approve/Deny pair
+			// wins wherever it sits; Yes/No is only a fallback for a card that offers it.
 			const pairAt = (() => {
-				for (let index = rows.length - 2; index >= 0; index--) {
+				const pairs = [];
+				for (let index = 0; index < rows.length - 1; index++) {
 					const [a, b] = [rows[index].label, rows[index + 1].label];
-					if ((a === "Approve" && b === "Deny") || (a === "Yes" && b === "No")) return index;
+					if ((a === "Approve" && b === "Deny") || (a === "Yes" && b === "No")) pairs.push({ index, canonical: a === "Approve" });
 				}
-				return -1;
+				if (pairs.length === 0) return -1;
+				const canonical = pairs.filter(pair => pair.canonical);
+				// Among equals take the one nearest the hint bar (the last), since the choices sit
+				// directly above it.
+				return (canonical.length > 0 ? canonical : pairs)[(canonical.length > 0 ? canonical : pairs).length - 1].index;
 			})();
 			if (pairAt >= 0) {
-				for (let index = pairAt; index < rows.length; index++) {
+				// Exactly the pair, not everything above it: a body row that is itself a choice word
+				// must not ride along and shift the focus index.
+				for (let index = pairAt; index < pairAt + 2; index++) {
 					if (rows[index].focused) focusRow = index - pairAt;
 					choices.push(rows[index].label);
 				}
 			} else if (rows.length === 1) {
-				// A partial render: a single focused positive/negative row still answers.
-				focusRow = 0;
-				choices.push(rows[0].label);
+				// A partial render: a single row still answers, but only if it is FOCUSED — inventing
+				// focusRow = 0 for an unfocused row would let a dictated deny submit Approve.
+				if (rows[0].focused) {
+					focusRow = 0;
+					choices.push(rows[0].label);
+				}
 			}
 		} else {
-			// No hint bar (an older or partial render): fall back to the first choice rows found,
-			// which is what the previous code did for every card.
-			for (const content of body) {
-				const choice = content.match(/^([\uf054\u276f\u25b6\s]*)(Approve|Deny|Yes|No)\s*$/);
-				if (!choice) continue;
-				if (/[\uf054\u276f\u25b6]/.test(choice[1])) focusRow = choices.length;
-				choices.push(choice[2]);
+			// No hint bar (an older or partial render). Scanning the whole body for choice words
+			// here would reintroduce exactly the phantom-row misfire this branch exists to avoid, so
+			// only choice rows at the very END of the card count — the region the menu occupies — and
+			// the same Approve/Deny preference applies. Rows are collected from the last non-blank
+			// line upward, then interpreted like the hint-bar case.
+			const tail = [];
+			for (let index = body.length - 1; index >= 0; index--) {
+				if (!body[index]) continue;
+				const choice = body[index].match(/^([\uf054\u276f\u25b6\s]*)(Approve|Deny|Yes|No)\s*$/);
+				if (!choice) break;
+				tail.unshift({ label: choice[2], focused: /[\uf054\u276f\u25b6]/.test(choice[1]) });
+			}
+			let at = -1;
+			for (let index = 0; index < tail.length - 1; index++) {
+				const [a, b] = [tail[index].label, tail[index + 1].label];
+				if ((a === "Approve" && b === "Deny") || (a === "Yes" && b === "No")) at = index;
+				if (a === "Approve" && b === "Deny") break; // canonical pair wins outright
+			}
+			if (at >= 0) {
+				for (let index = at; index < at + 2; index++) {
+					if (tail[index].focused) focusRow = index - at;
+					choices.push(tail[index].label);
+				}
+			} else if (tail.length === 1 && tail[0].focused) {
+				focusRow = 0;
+				choices.push(tail[0].label);
 			}
 		}
 		const toolName = lines[boxStart]
