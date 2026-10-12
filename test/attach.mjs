@@ -356,7 +356,12 @@ console.log("answer paths");
 			config: { sessionsRoot: "/tmp", tailIntervalMs: 500 },
 			transcriptPath: null,
 		});
+		// Recording must be ARMED BEFORE the call: installing it afterwards made the
+		// `!keys.includes("Enter")` half of the check below vacuous, so a guard regression that
+		// pressed Enter blind would still have passed.
 		let keys = [];
+		session.send = async key => { keys.push(key); return true; };
+
 		// A parsed pair with NO focused row: the cursor delta would be 0, no key sent, and Enter
 		// would submit whichever row the desk cursor sits on — so the answer is refused.
 		session.capture = async () => [
@@ -365,13 +370,24 @@ console.log("answer paths");
 		].join("\n");
 		const noFocus = await session.answerPermission("allow");
 		check("a permission pair with no focused row is refused",
-			noFocus === false && !keys.includes("Enter"),
+			noFocus === false && keys.length === 0,
 			JSON.stringify({ noFocus, keys }));
+
+		// The hint bar is a precondition, not decoration: a card caught mid-repaint can show the
+		// rows before the bar paints, and answering it would submit a row the wearer has not
+		// finished reading. Such a card must be unanswerable.
+		session.capture = async () => [
+			"╭─ Allow tool: bash ─╮", "│ Command: x │", "│  \uf054 Approve │", "│    Deny │", "╰────────────────────╯",
+		].join("\n");
+		keys = [];
+		const noBar = await session.answerPermission("allow");
+		check("a card whose hint bar has not painted is refused",
+			noBar === false && keys.length === 0,
+			JSON.stringify({ noBar, keys }));
 
 		// A permission card whose choices the parser cannot find (no hint bar, no choice rows at
 		// the end): the menu is unknown, so nothing may be submitted.
 		session.capture = async () => ["╭─ Allow tool: bash ─╮", "│ Command: x │", "│ │", "╰────────────────────╯"].join("\n");
-		session.send = async key => { keys.push(key); return true; };
 		const allowed = await session.answerPermission("allow");
 		check("an unparseable permission card is refused, not Entered",
 			allowed === false && !keys.includes("Enter"),
@@ -469,7 +485,7 @@ console.log("answer paths");
 	// The key-hint bar leads the mode decision because it is ASCII and the marker glyph is not.
 	// Before this, a dialog whose glyph and hint disagreed took the glyph's word: a multi-select
 	// question rendered with the circle glyph was answered as single, so every row the wearer named
-	// except the focused one was silently dropped. All eleven live captures agree on both signals,
+	// except the focused one was silently dropped. All twelve live captures agree on both signals,
 	// so this changes nothing on real dialogs and only helps a font that draws another glyph.
 	{
 		const mk = (glyph, hint) => [
@@ -490,7 +506,7 @@ console.log("answer paths");
 	// The tab bar is the LAST resort, not a primary signal. It is consulted only when neither
 	// the hint bar nor the marker glyph could decide, because a multi-QUESTION dialog renders
 	// that bar while each question is independently single- or multi-select. No live capture
-	// reaches this branch (all eleven carry a hint bar and the known markers), so this pins the
+	// reaches this branch (all twelve carry a hint bar and the known markers), so this pins the
 	// ordering rather than an observed render.
 	{
 		const tabOnly = [

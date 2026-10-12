@@ -422,9 +422,13 @@ export class AttachSession {
 				// says `Approve`/`Deny` — announcing different words than the desk shows makes the
 				// wearer answer a question they cannot see. Mirror the card's own vocabulary, falling
 				// back to the stock labels only when the card named something else again.
+				// Any label the card actually showed is passed through verbatim. Recognising only
+				// `Approve`/`Yes` meant a card saying `Allow`/`Cancel` — or the same pair in the other
+				// order — was announced with the stock words instead, which is the very mismatch this
+				// fixes for omp's vocabulary. The stock pair is only for a card that showed no rows.
 				options: [
-					{ text: /^(Approve|Yes)$/i.test(dialog.options[0]?.label ?? "") ? dialog.options[0].label : "Yes", key: "allow" },
-					{ text: /^(Deny|No)$/i.test(dialog.options[1]?.label ?? "") ? dialog.options[1].label : "No", key: "deny" },
+					{ text: dialog.options[0]?.label ?? "Yes", key: "allow" },
+					{ text: dialog.options[1]?.label ?? "No", key: "deny" },
 				],
 				suggestions: null,
 				sessionId: this.id,
@@ -670,11 +674,12 @@ export function readDialogFromPane(pane) {
 			if (!CHOICE_ROW.exec(body[index])) continue;
 			let end = index;
 			while (end + 1 < body.length && CHOICE_ROW.exec(body[end + 1])) end++;
-			// Rank runs, not just their length. `Approve`/`Deny` IS the permission menu's own
-			// vocabulary while `Yes`/`No` is what a body line looks like, so a canonical run wins
-			// even when a body pair is longer or sits higher. Among equal ranks the BOTTOM-most run
-			// wins, because the menu is at the end of the card — taking the topmost let an adjacent
-			// body `Yes`/`No` pair win a length tie and leave the card unanswerable (focus -1).
+			// Rank runs by vocabulary, then by length, then by position. `Approve`/`Deny` IS the
+			// permission menu's own vocabulary while `Yes`/`No` is what a body line looks like, so a
+			// canonical run wins even when a body pair is longer or sits higher. Position only breaks
+			// a full tie (same rank, same length), where the BOTTOM-most run wins because the menu
+			// sits at the end of the card — taking the topmost there let an adjacent body `Yes`/`No`
+			// pair beat the real menu and leave the card unanswerable (focus -1 → refuse).
 			const first = CHOICE_ROW.exec(body[index])[2];
 			const last = CHOICE_ROW.exec(body[end])[2];
 			const canonical = (first === "Approve" && last === "Deny") || (first === "Yes" && last === "No");
@@ -687,21 +692,27 @@ export function readDialogFromPane(pane) {
 			}
 			index = end;
 		}
-		// The bar is the first hint-like line at or below the menu, so a wrapped bar's later
-		// fragment is still found even though the first one has no keyword.
-		let hintIndex = -1;
-		for (let after = menuEnd + 1; after >= 0 && after < body.length; after++) {
+		// Walk down from the menu to the hint bar, so a wrapped bar's later fragment is still
+		// reachable even though its first one carries no keyword. The bar's position is not needed
+		// to build the rows — they come from the menu run itself — so only the fact that one exists
+		// matters here.
+		let hasHintBar = false;
+		for (let after = menuEnd + 1; after < body.length; after++) {
 			if (!body[after]) continue;
 			if (looksLikeHint(body[after])) {
-				hintIndex = after;
+				hasHintBar = true;
 				break;
 			}
 		}
-		// Walk back from just above the hint bar while the rows are still choices, skipping the
-		// blank rows the card may leave between them and the bar (measured: one blank line).
+		// Build the rows from the menu run itself, skipping the blank rows the card may leave
+		// between the run and the bar (measured: one blank line).
 		const choices = [];
 		let focusRow = -1;
-		if (menuEnd >= 0) {
+		// The bar is required, not merely present: a card mid-repaint can show the rows while the
+		// frame below them has not painted yet, and answering that partial card would submit a row
+		// the wearer has not finished reading. Requiring the bar makes such a card unanswerable
+		// instead, which the answer path turns into a refusal.
+		if (menuEnd >= 0 && hasHintBar) {
 			const rows = [];
 			for (let index = menuEnd; index >= menuStart; index--) {
 				const choice = body[index].match(CHOICE_ROW);
@@ -726,8 +737,8 @@ export function readDialogFromPane(pane) {
 				}
 				if (pairs.length === 0) return -1;
 				const canonical = pairs.filter(pair => pair.canonical);
-				// Among equals take the one nearest the hint bar (the last), since the choices sit
-				// directly above it.
+				// Among equals take the LAST pair, because the choices sit directly above the bar at
+				// the bottom of the card.
 				return (canonical.length > 0 ? canonical : pairs)[(canonical.length > 0 ? canonical : pairs).length - 1].index;
 			})();
 			if (pairAt >= 0) {
@@ -1032,8 +1043,8 @@ const CHECKED_GLYPH = "\uf14a";
 /**
  * A permission menu row: an optional focus glyph, then nothing but a positive or negative label.
  *
- * One definition because three sites match it (the hint-bar scan, the walk-back, and the no-hint
- * fallback) and they must agree on what a choice row is.
+ * One definition because two sites match it (the run scan that locates the menu, and the row
+ * build that reads it) and they must agree on what a choice row is.
  */
 const CHOICE_ROW = /^([\uf054\u276f\u25b6\s]*)(Approve|Deny|Yes|No)\s*$/;
 
