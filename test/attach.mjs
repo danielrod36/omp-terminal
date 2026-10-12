@@ -114,6 +114,20 @@ console.log("pane scraping");
 			JSON.stringify(m?.options.map(o => o.label)) === JSON.stringify(["Approve", "Deny"]),
 			JSON.stringify(m?.options.map(o => o.label)));
 
+		// A wrapped bar whose FIRST fragment carries no keyword: anchoring the scan on the bar alone
+		// would stop above the real choices, so the menu is located from the choice rows instead.
+		const wrappedKeywordless = card([
+			"│ Command: x                                                                   │",
+			"│  \uf054 Approve                                                                   │",
+			"│    Deny                                                                      │",
+			"│ ↑/↓ to choose then press                                                     │",
+			"│ select                                                                       │",
+		]);
+		const wk = readDialogFromPane(wrappedKeywordless);
+		check("a keywordless first bar fragment still yields the choices",
+			JSON.stringify(wk?.options.map(o => o.label)) === JSON.stringify(["Approve", "Deny"]) && wk?.focusedIndex === 0,
+			JSON.stringify(wk?.options.map(o => o.label)) + " focus=" + wk?.focusedIndex);
+
 		const wrapped = card([
 			"│ Command: x                                                                   │",
 			"│  \uf054 Approve                                                                   │",
@@ -336,10 +350,21 @@ console.log("answer paths");
 			config: { sessionsRoot: "/tmp", tailIntervalMs: 500 },
 			transcriptPath: null,
 		});
+		let keys = [];
+		// A parsed pair with NO focused row: the cursor delta would be 0, no key sent, and Enter
+		// would submit whichever row the desk cursor sits on — so the answer is refused.
+		session.capture = async () => [
+			"╭─ Allow tool: bash ─╮", "│ Command: x │", "│ Approve │", "│ Deny │",
+			"│ ↑/↓ navigate  󰌑 select  󱊷 cancel │", "╰────────────────────╯",
+		].join("\n");
+		const noFocus = await session.answerPermission("allow");
+		check("a permission pair with no focused row is refused",
+			noFocus === false && !keys.includes("Enter"),
+			JSON.stringify({ noFocus, keys }));
+
 		// A permission card whose choices the parser cannot find (no hint bar, no choice rows at
 		// the end): the menu is unknown, so nothing may be submitted.
 		session.capture = async () => ["╭─ Allow tool: bash ─╮", "│ Command: x │", "│ │", "╰────────────────────╯"].join("\n");
-		let keys = [];
 		session.send = async key => { keys.push(key); return true; };
 		const allowed = await session.answerPermission("allow");
 		check("an unparseable permission card is refused, not Entered",

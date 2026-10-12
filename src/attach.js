@@ -495,6 +495,12 @@ export class AttachSession {
 		// Find the row by label: the desk user may have moved the cursor, so the
 		// menu is not guaranteed to open on Approve.
 		const options = dialog.options ?? [];
+		// An unknown focus makes the cursor delta meaningless: sending Enter would submit whatever
+		// row the desk has highlighted, which need not be the one the wearer named.
+		if (!Number.isInteger(dialog.focusedIndex) || dialog.focusedIndex < 0) {
+			log.warn(`attach ${this.id} does not know which permission row is focused; refusing`);
+			return false;
+		}
 		const target = options.findIndex(option => (approved ? /^(Approve|Yes)$/i : /^(Deny|No)$/i).test(option.label));
 		// No matching row means the card was not understood — a parse that found no options, or a
 		// menu whose labels we do not know. Pressing Enter then submits whatever the cursor happens
@@ -647,31 +653,44 @@ export function readDialogFromPane(pane) {
 		// diff) or a WRAPPED hint bar move the boundary below the real choices, which emptied the
 		// option list: the card then answered blind. Scanning forward from each candidate choice run
 		// keeps a mention harmless because the run itself is what locates the bar.
-		const isChoiceRow = content => CHOICE_ROW.exec(content) !== null;
 		const looksLikeHint = content => /\bnavigate\b|\bselect\b|\bcancel\b|\btoggle\b|\bsubmit\b/.test(content);
-		// The last choice row anywhere in the body, and the first hint-like line below it.
-		let hintIndex = -1;
-		for (let index = body.length - 1; index >= 0; index--) {
-			if (!isChoiceRow(body[index])) continue;
-			for (let after = index + 1; after < body.length; after++) {
-				if (!body[after]) continue;
-				if (looksLikeHint(body[after])) {
-					hintIndex = after;
-					break;
-				}
+		// Locate the MENU first: the longest run of choice rows in the card. Anchoring on the choices
+		// rather than on the first keyword is what keeps a body mention harmless, and taking the
+		// whole run is what survives a hint bar that WRAPS: the bar's first fragment may carry no
+		// keyword at all, so a scan keyed to the bar alone would stop above the real choices.
+		let menuEnd = -1;
+		let menuStart = -1;
+		let menuLength = 0;
+		for (let index = 0; index < body.length; index++) {
+			if (!CHOICE_ROW.exec(body[index])) continue;
+			let end = index;
+			while (end + 1 < body.length && CHOICE_ROW.exec(body[end + 1])) end++;
+			if (end - index + 1 > menuLength) {
+				menuLength = end - index + 1;
+				menuStart = index;
+				menuEnd = end;
 			}
-			break;
+			index = end;
+		}
+		// The bar is the first hint-like line at or below the menu, so a wrapped bar's later
+		// fragment is still found even though the first one has no keyword.
+		let hintIndex = -1;
+		for (let after = menuEnd + 1; after >= 0 && after < body.length; after++) {
+			if (!body[after]) continue;
+			if (looksLikeHint(body[after])) {
+				hintIndex = after;
+				break;
+			}
 		}
 		// Walk back from just above the hint bar while the rows are still choices, skipping the
 		// blank rows the card may leave between them and the bar (measured: one blank line).
 		const choices = [];
 		let focusRow = -1;
-		if (hintIndex > 0) {
+		if (menuEnd >= 0) {
 			const rows = [];
-			for (let index = hintIndex - 1; index >= 0; index--) {
-				if (!body[index]) continue; // blank padding is not a boundary
+			for (let index = menuEnd; index >= menuStart; index--) {
 				const choice = body[index].match(CHOICE_ROW);
-				if (!choice) break;
+				if (!choice) continue;
 				rows.unshift({ label: choice[2], focused: /[\uf054\u276f\u25b6]/.test(choice[1]) });
 			}
 			// A permission card offers one positive and one negative row, so the run must END in a
@@ -750,7 +769,11 @@ export function readDialogFromPane(pane) {
 			toolName,
 			body: body.join("\n"),
 			prompt: toolName,
-			focusedIndex: focusRow >= 0 ? focusRow : 0,
+			// Report the focus we actually saw. Defaulting to 0 fabricated one: with no focused row
+			// the cursor delta came out 0, no key was sent, and Enter submitted whichever row the
+			// desk cursor happened to be on — the wearer says "allow" and cannot tell which row it
+			// hit. `-1` says "unknown", which answerPermission refuses on.
+			focusedIndex: focusRow,
 			options: choices.map(label => ({ label })),
 		};
 	}
