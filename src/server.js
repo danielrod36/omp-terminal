@@ -307,7 +307,11 @@ export function createBridge(config) {
 		} catch (error) {
 			const status = typeof error.statusCode === "number" ? error.statusCode : 500;
 			if (status >= 500) log.error(`unhandled route error: ${error.message}`);
-			if (!res.headersSent) sendJson(res, status, { error: error.message });
+			// A 5xx message can quote a filesystem path or a spawn failure; keep the detail
+			// in the log and answer the client with the category only. Deliberate 4xx
+			// messages are written for the caller and pass through unchanged.
+			const detail = status >= 500 ? "internal error" : error.message;
+			if (!res.headersSent) sendJson(res, status, { error: detail });
 			else res.end();
 		}
 	});
@@ -424,7 +428,10 @@ export function createBridge(config) {
 				const history = fromDisk.length > 0 ? fromDisk : historyFromRing(live?.id ?? id, limit);
 				return sendJson(res, 200, { history });
 			} catch (error) {
-				return sendJson(res, 200, { history: historyFromRing(id, limit), error: error.message });
+				// The message can carry an absolute path from the session scan; that is for
+				// the log, not for a client that merely holds a token.
+				log.warn(`history for ${id} failed: ${error.message}`);
+				return sendJson(res, 200, { history: historyFromRing(id, limit), error: "could not read the session history" });
 			}
 		}
 

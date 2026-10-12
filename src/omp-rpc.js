@@ -82,7 +82,12 @@ export class OmpRpc extends EventEmitter {
 			log.warn(`stdin closed: ${error.code ?? error.message}`);
 		});
 		this.#child.stdout.on("error", error => {
+			// A stdout failure leaves readline silent, so no frame would ever arrive again and
+			// #closed stays false: isDead() would never evict the session and every later
+			// send() would burn its full timeout. Kill so the 'exit' path fails the pending
+			// requests and the bridge respawns on the next prompt.
 			log.warn(`stdout closed: ${error.code ?? error.message}`);
+			this.kill();
 		});
 		this.#child.stderr.on("error", error => {
 			log.warn(`stderr closed: ${error.code ?? error.message}`);
