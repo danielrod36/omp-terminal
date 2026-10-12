@@ -118,10 +118,12 @@ export function linkSessions(left, right) {
 	// because a merge can bring frames from two ids. Only ids that actually emitted qualify —
 	// every linked id once had a class of its own, and protecting those would defeat the cap.
 	for (const id of source.owners) {
-		if (target.owners.length < MAX_RING_OWNERS) target.owners.push(id);
+		if (target.owners.length >= MAX_RING_OWNERS) break;
+		if (!target.owners.includes(id)) target.owners.push(id);
 	}
-	if (target.firstEmit && !target.owners.includes(target.firstEmit)) target.owners.push(target.firstEmit);
-	if (target.owners.length === 0) target.owners.push(target.emitId);
+	// Nothing has emitted yet (two id-only classes were just linked): keep the survivor's own id
+	// so the class still has one, and a later emit under it lands here. This is the only entry
+	// that did not emit — it is a placeholder, not a claim that the id owns frames.
 	// Move the clients too. Leaving them on `source` strands them: that object is no longer
 	// reachable from any id, so `emit` never fans to it, the backpressure sweep cannot see
 	// it, and `totalClients` undercounts — a client subscribed under a merged-away id would
@@ -197,7 +199,9 @@ export function emit(sessionId, message) {
 		// regardless, so this changes no behaviour — but it also names the id whose frames the
 		// ring holds, which the trim protects.
 		cls.firstEmit = sessionId;
-		if (cls.owners.length < MAX_RING_OWNERS) cls.owners.push(sessionId);
+		// Guarded: the merge seeds this list with the id it keeps, so an unguarded push would
+		// spend two of the four slots on one id.
+		if (cls.owners.length < MAX_RING_OWNERS && !cls.owners.includes(sessionId)) cls.owners.push(sessionId);
 	} else if (cls.firstEmit !== sessionId && cls.ids.size > 1 && !cls.firstEmitWarned) {
 		// Diagnostic only, and a narrow one: it reports an emit id that changed over time, as a
 		// caller id would if some future path emitted before adoption. It cannot see a swapped
