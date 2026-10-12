@@ -247,6 +247,10 @@ export class OwnedSession {
 			const lines = String(frame.title ?? "").split("\n");
 			const toolName = lines[0]?.replace(/^Allow tool:\s*/, "") ?? "tool";
 			this.state = "awaiting";
+			// omp sends the offered choices as plain label strings, and `answerPermission` replies
+			// with the label it chose, so the announce must name those same rows rather than a
+			// hardcoded pair.
+			const offered = Array.isArray(frame.options) ? frame.options.map(String).filter(Boolean) : [];
 			emit(
 				this.id,
 				permissionRequestFrame(this.id, {
@@ -254,6 +258,7 @@ export class OwnedSession {
 					description: lines.slice(1).join(" ").trim(),
 					detail: lines.slice(1).join("\n"),
 					toolUseId: id,
+					...(offered.length >= 2 ? { labels: [offered[0], offered[1]] } : {}),
 				}),
 			);
 			emit(this.id, statusFrame(this.id, "awaiting", this.provider));

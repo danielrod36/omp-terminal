@@ -1,7 +1,7 @@
 {
 	"name": "@daniel/omp-terminal",
 	"version": "0.1.0",
-	"description": "Even Realities G2 Terminal Mode bridge for oh-my-pi (omp) — HTTP/SSE wire-compatible with @evenrealities/even-terminal",
+	"description": "Even Realities G2 Terminal Mode bridge for oh-my-pi (omp) \u2014 HTTP/SSE wire-compatible with @evenrealities/even-terminal",
 	"type": "module",
 	"bin": {
 		"omp-terminal": "bin/omp-terminal.js"
@@ -15,7 +15,8 @@
 		"test:ci": "node test/smoke.mjs --no-omp",
 		"test:smoke": "node test/smoke.mjs",
 		"test:attach": "node test/attach.mjs",
-		"test:live": "node test/smoke.mjs && node test/attach.mjs --live"
+		"test:live": "node test/smoke.mjs && node test/attach.mjs --live && node test/live-permission.mjs",
+		"test:permission": "node test/live-permission.mjs"
 	},
 	"license": "MIT",
 	"private": true

@@ -68,10 +68,15 @@ export function questionAnswerFrame(sessionId, answers) {
 }
 
 /** Permission prompt with the stock option keys: allow / allowAlways / deny. */
-export function permissionRequestFrame(sessionId, { toolName, description, detail, toolUseId, allowAlways = false }) {
-	const options = [{ text: "Yes", key: "allow" }];
-	if (allowAlways) options.push({ text: "Yes, always allow this tool", key: "allowAlways" });
-	options.push({ text: "No", key: "deny" });
+export function permissionRequestFrame(sessionId, { toolName, description, detail, toolUseId, allowAlways = false, labels = ["Yes", "No"] }) {
+	// `key` is the decision the app posts back; `text` is what the wearer reads. The stock server
+	// pairs Claude Code's `Yes`/`No` labels with these keys, but omp's approval card says
+	// `Approve`/`Deny` (it answers `select(<Allow tool: …>, ["Approve", "Deny"])` and tests
+	// `value === "Approve"`). Announcing words the desk does not show makes the wearer answer a
+	// question they cannot see, so the card's own labels are passed in.
+	const options = [{ text: labels[0], key: "allow" }];
+	if (allowAlways) options.push({ text: `Yes, always allow this tool`, key: "allowAlways" });
+	options.push({ text: labels[1], key: "deny" });
 	return {
 		type: "permission_request",
 		toolName,

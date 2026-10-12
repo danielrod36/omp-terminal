@@ -466,6 +466,26 @@ console.log("sse ring lifecycle");
 	check("a client on the alias holds the whole class open", events.dropSession("ring-canon2") === false);
 }
 
+// The permission announce must name the rows the desk card shows. omp's approval dialog calls
+// `select(<Allow tool: …>, ["Approve", "Deny"])` and tests the reply as `value === "Approve"`, so
+// announcing the stock `Yes`/`No` would ask the wearer about words they cannot see.
+{
+	const { permissionRequestFrame } = await import("../src/frames.js");
+	const named = permissionRequestFrame("s", { toolName: "bash", description: "d", detail: "d", toolUseId: "t", labels: ["Approve", "Deny"] });
+	check("a permission frame announces the card's own rows",
+		JSON.stringify(named.options.map(o => o.text)) === JSON.stringify(["Approve", "Deny"]) &&
+		JSON.stringify(named.options.map(o => o.key)) === JSON.stringify(["allow", "deny"]),
+		JSON.stringify(named.options));
+	const stock = permissionRequestFrame("s", { toolName: "bash", description: "d", detail: "d", toolUseId: "t" });
+	check("with no card rows it falls back to the stock labels",
+		JSON.stringify(stock.options.map(o => o.text)) === JSON.stringify(["Yes", "No"]),
+		JSON.stringify(stock.options));
+	const always = permissionRequestFrame("s", { toolName: "bash", description: "d", detail: "d", toolUseId: "t", allowAlways: true, labels: ["Approve", "Deny"] });
+	check("allowAlways is offered between the two decisions",
+		JSON.stringify(always.options.map(o => o.key)) === JSON.stringify(["allow", "allowAlways", "deny"]),
+		JSON.stringify(always.options.map(o => o.key)));
+}
+
 await bridge.close();
 rmSync(workDir, { recursive: true, force: true });
 
