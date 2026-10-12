@@ -496,7 +496,15 @@ export class AttachSession {
 		// menu is not guaranteed to open on Approve.
 		const options = dialog.options ?? [];
 		const target = options.findIndex(option => (approved ? /^(Approve|Yes)$/i : /^(Deny|No)$/i).test(option.label));
-		const steps = (target >= 0 ? target : approved ? 0 : 1) - (dialog.focusedIndex ?? 0);
+		// No matching row means the card was not understood — a parse that found no options, or a
+		// menu whose labels we do not know. Pressing Enter then submits whatever the cursor happens
+		// to sit on, so a dictated "allow" can land on Deny. Refuse instead: the wearer retries and
+		// nothing is approved by accident.
+		if (target < 0) {
+			log.warn(`attach ${this.id} could not find an ${approved ? "approve" : "deny"} row; refusing to press Enter`);
+			return false;
+		}
+		const steps = target - (dialog.focusedIndex ?? 0);
 		if (!(await this.#moveCursor(steps))) return false;
 		if (!(await this.send("Enter", { enter: false }))) return false;
 		return this.#answered();

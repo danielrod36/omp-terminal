@@ -324,6 +324,29 @@ console.log("answer paths");
 		check('dictating the visible row "Yes" resolves', byVisible.answered === true && byVisible.pane.focus === 0, JSON.stringify({ answered: byVisible.answered, focus: byVisible.pane.focus }));
 	}
 
+	// A permission card whose menu could not be located must NOT be answered. The old code fell
+	// back to `approved ? 0 : 1` relative to a target of -1 and pressed Enter, which submits
+	// whatever the cursor sits on — a dictated "allow" can land on Deny.
+	{
+		const session = new AttachSession({
+			id: "tmux:perm",
+			tmuxSession: "perm",
+			cwd: "/tmp",
+			provider: "p",
+			config: { sessionsRoot: "/tmp", tailIntervalMs: 500 },
+			transcriptPath: null,
+		});
+		// A permission card whose choices the parser cannot find (no hint bar, no choice rows at
+		// the end): the menu is unknown, so nothing may be submitted.
+		session.capture = async () => ["╭─ Allow tool: bash ─╮", "│ Command: x │", "│ │", "╰────────────────────╯"].join("\n");
+		let keys = [];
+		session.send = async key => { keys.push(key); return true; };
+		const allowed = await session.answerPermission("allow");
+		check("an unparseable permission card is refused, not Entered",
+			allowed === false && !keys.includes("Enter"),
+			JSON.stringify({ allowed, keys }));
+	}
+
 	// An ambiguous LABEL match must refuse rather than fall through to the number
 	// path, which would Enter a row the dictation never clearly named.
 	{
