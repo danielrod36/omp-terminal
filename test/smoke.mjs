@@ -386,6 +386,11 @@ console.log("sse ring lifecycle");
 			events.historyFromRing("tie-caller", 50).length === 1,
 			`caller=${events.historyFromRing("tie-caller", 50).length}`);
 		for (let i = 0; i < 400; i++) events.linkSessions(`tie-junk-${i}`, "tie-canonical");
+		// Assert the intermediate state, or the recovery check passes even when nothing was
+		// forgotten (verified: disabling the trim left that check green).
+		check("cap pressure drops the unsubscribed caller's name",
+			events.getMessages("tie-caller", 0).length === 0,
+			`caller=${events.getMessages("tie-caller", 0).length}`);
 		events.linkSessions("tie-caller", "tie-canonical");
 		check("a forgotten caller recovers by re-linking, with its history intact",
 			events.historyFromRing("tie-caller", 50).length === 1,
