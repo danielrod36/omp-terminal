@@ -123,6 +123,12 @@ console.log("pane scraping");
 			"│ ↑/↓ to choose then press                                                     │",
 			"│ select                                                                       │",
 		]);
+		// The announce must name the rows the CARD shows, not a fixed Yes/No pair: the wearer
+		// answers by voice using words they can see.
+		check("an Approve/Deny card is announced with its own vocabulary",
+			JSON.stringify(readDialogFromPane(wrappedKeywordless)?.options.map(o => o.label)) === JSON.stringify(["Approve", "Deny"]),
+			JSON.stringify(readDialogFromPane(wrappedKeywordless)?.options.map(o => o.label)));
+
 		const wk = readDialogFromPane(wrappedKeywordless);
 		check("a keywordless first bar fragment still yields the choices",
 			JSON.stringify(wk?.options.map(o => o.label)) === JSON.stringify(["Approve", "Deny"]) && wk?.focusedIndex === 0,

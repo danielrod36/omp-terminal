@@ -417,9 +417,14 @@ export class AttachSession {
 				description: dialog.body.replace(/\n/g, " ").slice(0, 200),
 				detail: dialog.body,
 				toolUseId: `attach-${this.id}`,
+				// `key` is the decision the app posts back; `text` is what the wearer reads. The
+				// stock server pairs Claude Code's `Yes`/`No` labels with these keys, but omp's card
+				// says `Approve`/`Deny` — announcing different words than the desk shows makes the
+				// wearer answer a question they cannot see. Mirror the card's own vocabulary, falling
+				// back to the stock labels only when the card named something else again.
 				options: [
-					{ text: "Yes", key: "allow" },
-					{ text: "No", key: "deny" },
+					{ text: /^(Approve|Yes)$/i.test(dialog.options[0]?.label ?? "") ? dialog.options[0].label : "Yes", key: "allow" },
+					{ text: /^(Deny|No)$/i.test(dialog.options[1]?.label ?? "") ? dialog.options[1].label : "No", key: "deny" },
 				],
 				suggestions: null,
 				sessionId: this.id,
@@ -660,13 +665,23 @@ export function readDialogFromPane(pane) {
 		// keyword at all, so a scan keyed to the bar alone would stop above the real choices.
 		let menuEnd = -1;
 		let menuStart = -1;
-		let menuLength = 0;
+		let best = -1;
 		for (let index = 0; index < body.length; index++) {
 			if (!CHOICE_ROW.exec(body[index])) continue;
 			let end = index;
 			while (end + 1 < body.length && CHOICE_ROW.exec(body[end + 1])) end++;
-			if (end - index + 1 > menuLength) {
-				menuLength = end - index + 1;
+			// Rank runs, not just their length. `Approve`/`Deny` IS the permission menu's own
+			// vocabulary while `Yes`/`No` is what a body line looks like, so a canonical run wins
+			// even when a body pair is longer or sits higher. Among equal ranks the BOTTOM-most run
+			// wins, because the menu is at the end of the card — taking the topmost let an adjacent
+			// body `Yes`/`No` pair win a length tie and leave the card unanswerable (focus -1).
+			const first = CHOICE_ROW.exec(body[index])[2];
+			const last = CHOICE_ROW.exec(body[end])[2];
+			const canonical = (first === "Approve" && last === "Deny") || (first === "Yes" && last === "No");
+			const rank = canonical ? 1 : 0;
+			const score = rank * 1000 + (end - index + 1);
+			if (score >= best) {
+				best = score;
 				menuStart = index;
 				menuEnd = end;
 			}
@@ -729,34 +744,6 @@ export function readDialogFromPane(pane) {
 					focusRow = 0;
 					choices.push(rows[0].label);
 				}
-			}
-		} else {
-			// No hint bar (an older or partial render). Scanning the whole body for choice words
-			// here would reintroduce exactly the phantom-row misfire this branch exists to avoid, so
-			// only choice rows at the very END of the card count — the region the menu occupies — and
-			// the same Approve/Deny preference applies. Rows are collected from the last non-blank
-			// line upward, then interpreted like the hint-bar case.
-			const tail = [];
-			for (let index = body.length - 1; index >= 0; index--) {
-				if (!body[index]) continue;
-				const choice = body[index].match(CHOICE_ROW);
-				if (!choice) break;
-				tail.unshift({ label: choice[2], focused: /[\uf054\u276f\u25b6]/.test(choice[1]) });
-			}
-			let at = -1;
-			for (let index = 0; index < tail.length - 1; index++) {
-				const [a, b] = [tail[index].label, tail[index + 1].label];
-				if ((a === "Approve" && b === "Deny") || (a === "Yes" && b === "No")) at = index;
-				if (a === "Approve" && b === "Deny") break; // canonical pair wins outright
-			}
-			if (at >= 0) {
-				for (let index = at; index < at + 2; index++) {
-					if (tail[index].focused) focusRow = index - at;
-					choices.push(tail[index].label);
-				}
-			} else if (tail.length === 1 && tail[0].focused) {
-				focusRow = 0;
-				choices.push(tail[0].label);
 			}
 		}
 		const toolName = lines[boxStart]
