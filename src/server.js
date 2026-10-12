@@ -117,9 +117,11 @@ export function createBridge(config) {
 		if (!session || !isDead(session)) return session;
 		sessions.delete(session.id);
 		if (session.tmuxSession) attachRegistry.delete(session.tmuxSession);
-		for (const [alias, canonical] of sessionAliases) {
-			if (canonical === session.id) sessionAliases.delete(alias);
-		}
+		// Aliases that named this id survive the drop: a replacement takes the same
+		// canonical id, and a client still holding its original id must keep resolving to it
+		// rather than 404ing until something happens to re-scan the store. `getLive` returns
+		// null for a dangling alias, so leaving one is harmless.
+		
 		// The SSE ring is keyed by session id and is not this map's to free, but a dead
 		// session's ring is now unreachable: without this, one ring per conversation ever
 		// started is retained for the life of the process.
