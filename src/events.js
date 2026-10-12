@@ -77,15 +77,10 @@ export function linkSessions(left, right) {
 	// Pick the survivor so the class that already OWNS the frames, and the id it emits under,
 	// is the one that keeps them. Callers link `(aliasId, canonicalId)`, so `right` is the
 	// canonical one and wins a tie — otherwise the first link of an alias pair would move the
-	// emit id onto the alias, and a later `emit` under the canonical would refuse.
+	// emit id onto the alias, and the ring would be keyed on a provisional id.
 	const leftWins = leftClass.messages.length > rightClass.messages.length ||
 		(leftClass.messages.length === rightClass.messages.length && leftClass.ids.size > rightClass.ids.size);
 	const [target, source] = leftWins ? [leftClass, rightClass] : [rightClass, leftClass];
-	// Record the order the two sides were linked in, so `emit` can tell the canonical (second)
-	// id from a caller id. Every call site passes `(callerId, canonicalId)`, but that convention
-	// is otherwise unenforced: a swapped call would put frames in a ring keyed on a provisional
-	// id. The loser is the source side, so the survivor's canonical is whichever the source map
-	// still points at after the remap.
 	// Both sides can already hold frames (an emit before the link). Keep BOTH histories rather
 	// than dropping one, renumbering the source onto the target's id space so the ids stay
 	// monotonic and unique across the merge. The merged order is each side's own emission
@@ -96,7 +91,7 @@ export function linkSessions(left, right) {
 	// after such a merge can re-deliver already-seen source frames. Today no server path emits
 	// into both classes before linking them, so the case does not arise; re-delivering is also
 	// the safe direction for the dark-window contract, since a repeat frame is idempotent for
-	// the lens while a skipped one is lost. Enforced by `firstEmit` below.
+	// the lens while a skipped one is lost.
 	if (source.messages.length > 0) {
 		const base = target.nextId;
 		const merged = source.messages.map(entry => ({ id: entry.id + base - 1, message: entry.message }));
@@ -185,8 +180,10 @@ export function emit(sessionId, message) {
 	// brand-new class fixes the id that ring belongs to, which is the session's canonical id on
 	// every current path (the ring only receives frames after adoption).
 	if (cls.firstEmit === null) {
-		// The id that first writes to a class is the one its ring belongs to. On every current
-		// path that is the session's canonical id, because frames only start after adoption.
+		// Remember the id that first wrote to this class. Frames land in the class's one ring
+		// either way, so this changes no behaviour — it is a diagnostic for the one convention
+		// the call sites follow by hand: that a ring starts under the session's canonical id,
+		// because frames only begin after adoption. A swapped link argument would show up here.
 		cls.firstEmit = sessionId;
 	} else if (cls.firstEmit !== sessionId && cls.ids.size > 1) {
 		log.warn(`emit under ${sessionId} after the class first emitted under ${cls.firstEmit}; frames share the ring but the id differs`);
