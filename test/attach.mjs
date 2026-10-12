@@ -382,6 +382,22 @@ console.log("answer paths");
 		check("square + toggle stays multi", readDialogFromPane(mk(SQUARE, "toggle"))?.multi === true);
 	}
 
+	// The tab bar is the LAST resort, not a primary signal. It is consulted only when neither
+	// the hint bar nor the marker glyph could decide, because a multi-QUESTION dialog renders
+	// that bar while each question is independently single- or multi-select. No live capture
+	// reaches this branch (all eleven carry a hint bar and the known markers), so this pins the
+	// ordering rather than an observed render.
+	{
+		const tabOnly = [
+			"╭─ Ask ─╮", "│  tests    runner    Submit │", "│ Continue? │", "├────┤",
+			`│ ${FOCUS}  Yes │`, `│    No │`,
+			"│ │", "├────┤", "╰────╯",
+		].join("\n");
+		const d = readDialogFromPane(tabOnly);
+		check("an unknown font with a tab bar still yields a dialog", d?.options.length === 2, JSON.stringify(d?.options.map(o => o.label)));
+		check("and the tab bar is what decided the mode", d?.multi === true, String(d?.multi));
+	}
+
 	// A multi-question dialog renders a tab bar ending in `Submit`, but each question
 	// is independently single- or multi-select. The tab-bar `Submit` must not promote a
 	// single-select question — the marker glyph decides. Captured live from omp 18.8.9.

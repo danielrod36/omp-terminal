@@ -717,11 +717,23 @@ function readAskFromPane(lines) {
 	//     each question is independently single- or multi-select, so it is the weakest claim.
 	const hintMulti = /\btoggle\b/.test(box.help) ? true : /\bselect\b/.test(box.help) ? false : null;
 	const glyphMulti = box.markerGlyph === "\uf096" ? true : box.markerGlyph === "\uf10c" ? false : null;
+	// The tab-bar `Submit` is the WEAKEST signal: a multi-QUESTION dialog renders that bar while
+	// each question is independently single- or multi-select, so it is evidence about the FORM,
+	// not the question. It is consulted only when neither the hint bar nor the marker glyph could
+	// decide (an unknown font with no hint line) — a case absent from all eleven live captures,
+	// which use only the known markers and carry a hint bar. Requiring a checked row to
+	// corroborate would not help: an alternate font's checked glyph is unnameable, so `checked`
+	// is always empty there and the card would be needlessly unreadable.
 	const headerSubmit = box.header.length >= 2 && /\bSubmit\s*$/.test(box.header[0]);
 	// The checked fallback requires MORE THAN ONE checked row: a single checked row is
 	// the wearer's cursor resting on a selected option in either mode, so it must not
 	// promote a single-select dialog to the multi path (where a dictated answer to an
 	// unchecked row would be dropped).
+	// The checked fallback requires MORE THAN ONE checked row: a single checked row is the
+	// wearer's cursor resting on a selected option in either mode, so it must not promote a
+	// single-select dialog to the multi path (where a dictated answer to an unchecked row is
+	// dropped). A multi dialog with no hint and an unknown font has nothing better than the tab
+	// bar, so that is the last resort.
 	const multi =
 		hintMulti ??
 		glyphMulti ??
