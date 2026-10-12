@@ -63,23 +63,23 @@ export function linkSessions(left, right) {
  * so an app that reconnects to a just-finished session still gets its replay.
  */
 export function dropSession(sessionId) {
-	const session = sessions.get(sessionId);
-	if (!session) return false;
-	if (session.clients.size > 0) return false;
 	const links = idLinks.get(sessionId);
-	if (links) {
-		// A linked class is live as long as any of its ids still has a ring.
-		for (const id of links) {
-			if (id === sessionId) continue;
-			if (sessions.has(id)) return false;
-		}
-		for (const id of links) idLinks.delete(id);
-	} else {
-		idLinks.delete(sessionId);
+	// A linked class dies together: the ids are one session under two names, so its
+	// rings are only reclaimable when none of them has a live client. Without this the
+	// alias ring — which holds a full copy of every frame, since `emit` writes into each
+	// ring in the class — outlives the canonical one and the class leaks anyway.
+	const ids = links ? [...links] : [sessionId];
+	for (const id of ids) {
+		const session = sessions.get(id);
+		if (session && session.clients.size > 0) return false;
 	}
-	sessions.delete(sessionId);
-	log.debug(`dropped ring for ${sessionId}`);
-	return true;
+	let dropped = false;
+	for (const id of ids) {
+		if (sessions.delete(id)) dropped = true;
+		if (links) idLinks.delete(id);
+	}
+	if (dropped) log.debug(`dropped ring(s) for ${ids.join(" = ")}`);
+	return dropped;
 }
 
 /** Append to the ring and fan out live. Returns the primary ring id. */

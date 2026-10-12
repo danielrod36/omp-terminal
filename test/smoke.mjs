@@ -263,6 +263,32 @@ console.log("tunnel provider parsing");
 	}
 }
 
+console.log("sse ring lifecycle");
+{
+	// A long-lived bridge mints a fresh id per conversation, so a ring that is never
+	// freed retains every conversation's frames for the life of the process. The ring
+	// is dropped only once nothing can read it again: an attached client or a live
+	// alias must hold it open.
+	const events = await import("../src/events.js");
+	const fake = { write() {}, end() {}, on() {}, once() {}, setHeader() {}, flushHeaders() {}, writableEnded: false, destroyed: false };
+	events.emit("ring-test", { type: "user_prompt", text: "hi" });
+	check("a ring with no client is reclaimable", events.dropSession("ring-test") === true);
+	const live = "ring-live";
+	events.emit(live, { type: "user_prompt", text: "hi" });
+	events.addClient(live, fake, false, null);
+	check("a ring with an attached client is not reclaimed", events.dropSession(live) === false);
+	check("its history stays readable for the reconnect", events.historyFromRing(live).length > 0);
+	// A linked class is one session under two names: dropping only the canonical leaves
+	// the alias holding a full copy of every frame.
+	events.linkSessions("ring-alias", "ring-canon");
+	events.emit("ring-canon", { type: "user_prompt", text: "x" });
+	check("a linked class drops as a unit", events.dropSession("ring-canon") === true);
+	events.linkSessions("ring-alias2", "ring-canon2");
+	events.emit("ring-canon2", { type: "user_prompt", text: "x" });
+	events.addClient("ring-alias2", fake, false, null);
+	check("a client on the alias holds the whole class open", events.dropSession("ring-canon2") === false);
+}
+
 await bridge.close();
 rmSync(workDir, { recursive: true, force: true });
 
