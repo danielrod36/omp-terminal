@@ -121,9 +121,9 @@ export function linkSessions(left, right) {
 		if (target.owners.length >= MAX_RING_OWNERS) break;
 		if (!target.owners.includes(id)) target.owners.push(id);
 	}
-	// Nothing has emitted yet (two id-only classes were just linked): keep the survivor's own id
-	// so the class still has one, and a later emit under it lands here. This is the only entry
-	// that did not emit — it is a placeholder, not a claim that the id owns frames.
+	// `owners` is empty when neither side had emitted (two id-only classes just linked). It stays
+	// empty: only an emit qualifies an id for the list, and the first emit under the survivor
+	// adds it. Nothing needs seeding here.
 	// Move the clients too. Leaving them on `source` strands them: that object is no longer
 	// reachable from any id, so `emit` never fans to it, the backpressure sweep cannot see
 	// it, and `totalClients` undercounts — a client subscribed under a merged-away id would
@@ -199,8 +199,8 @@ export function emit(sessionId, message) {
 		// regardless, so this changes no behaviour — but it also names the id whose frames the
 		// ring holds, which the trim protects.
 		cls.firstEmit = sessionId;
-		// Guarded: the merge seeds this list with the id it keeps, so an unguarded push would
-		// spend two of the four slots on one id.
+		// Deduping is defence in depth: `owners` is empty until an emit adds to it, and the merge
+		// copies only ids that already emitted, so an id cannot normally be present here twice.
 		if (cls.owners.length < MAX_RING_OWNERS && !cls.owners.includes(sessionId)) cls.owners.push(sessionId);
 	} else if (cls.firstEmit !== sessionId && cls.ids.size > 1 && !cls.firstEmitWarned) {
 		// Diagnostic only, and a narrow one: it reports an emit id that changed over time, as a
