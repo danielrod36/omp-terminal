@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 import { URL } from "node:url";
 import { createLogger, redactToken } from "./log.js";
-import { addClient, getMessages, historyFromRing, linkSessions, totalClients } from "./events.js";
+import { addClient, dropSession, getMessages, historyFromRing, linkSessions, totalClients } from "./events.js";
 import { OwnedSession, parseQuestionAnswer } from "./provider.js";
 import { AttachSession, listTmuxOmpSessions } from "./attach.js";
 import { findOmpSession, listOmpSessions, ompHistory } from "./sessions.js";
@@ -39,7 +39,15 @@ async function readJson(req) {
 	if (chunks.length === 0) return {};
 	const text = Buffer.concat(chunks).toString("utf8").trim();
 	if (!text) return {};
-	return JSON.parse(text);
+	try {
+		return JSON.parse(text);
+	} catch (error) {
+		// A malformed body is the client's mistake: mapping it to 500 would both
+		// misreport the fault and log a client error at error level.
+		const wrapped = new Error(`invalid JSON body: ${error.message}`);
+		wrapped.statusCode = 400;
+		throw wrapped;
+	}
 }
 
 /**
@@ -101,6 +109,10 @@ export function createBridge(config) {
 		for (const [alias, canonical] of sessionAliases) {
 			if (canonical === session.id) sessionAliases.delete(alias);
 		}
+		// The SSE ring is keyed by session id and is not this map's to free, but a dead
+		// session's ring is now unreachable: without this, one ring per conversation ever
+		// started is retained for the life of the process.
+		dropSession(session.id);
 		return null;
 	}
 
@@ -173,7 +185,15 @@ export function createBridge(config) {
 				config,
 				ompArgs: args,
 			});
-			await session.start();
+			// A start that rejects must not leave the child behind: the session is not
+			// in `sessions` yet, so neither a later prompt nor shutdown can reap it, and
+			// a retry would orphan another. Kill it here, where the ownership still is.
+			try {
+				await session.start();
+			} catch (error) {
+				session.kill();
+				throw error;
+			}
 			// omp mints the canonical session id (kept across a resume). Adopt it,
 			// and link the id the client already subscribed to, so whichever
 			// identity the app holds the answer still reaches its SSE ring.
@@ -385,7 +405,12 @@ export function createBridge(config) {
 
 		const historyMatch = path.match(/^\/api\/sessions\/([^/]+)\/history$/);
 		if (req.method === "GET" && historyMatch) {
-			const id = decodeURIComponent(historyMatch[1]);
+			let id;
+			try {
+				id = decodeURIComponent(historyMatch[1]);
+			} catch {
+				return sendJson(res, 400, { error: "malformed session id in path" });
+			}
 			const limit = Math.min(Number(url.searchParams.get("limit")) || config.historyLimit, 20);
 			try {
 				// A bridge-owned session knows its exact transcript; a desk
@@ -463,7 +488,17 @@ export function createBridge(config) {
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
 			const session = dropIfDead(getLive(sessionId));
 			if (session) return sendJson(res, 200, { state: session.state, sessionId, provider: config.providerLabel });
-			const found = findOmpSession(config, sessionId);
+			// The same call is mapped to 503 in ensureOwned: a scan that could not complete
+			// must not surface as a 500 with the sessions root in the message.
+			let found;
+			try {
+				found = findOmpSession(config, sessionId);
+			} catch (error) {
+				if (error.code === "SESSION_SCAN_FAILED") {
+					return sendJson(res, 503, { error: "could not scan the session root" });
+				}
+				throw error;
+			}
 			if (!found) return sendJson(res, 404, { error: "Session not found" });
 			return sendJson(res, 200, { state: "idle", sessionId, provider: config.providerLabel });
 		}

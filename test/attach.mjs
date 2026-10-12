@@ -288,6 +288,24 @@ console.log("answer paths");
 		check("an all-checked known font drops an exotic stray", JSON.stringify(kept?.options.map(o => o.label)) === JSON.stringify(["A", "B"]), JSON.stringify(kept?.options.map(o => o.label)));
 	}
 
+	// A KNOWN font names every marker, so a row whose glyph is neither the empty marker
+	// nor the checked one is provably a stray — even when it ties the vote — and is
+	// dropped. Keeping it would shift every later dictated index. (The alternate-font
+	// keep-all policy above does NOT apply here: nothing is unnameable.)
+	{
+		const X = "\uf2c7";
+		const box = rows => ["╭─ Ask ─╮", "│ Which? │", "├────┤", ...rows, "│  │", "├────┤", "│ select · ↑/↓ │", "╰────╯"].join("\n");
+		// A tie between two KNOWN empty glyphs is itself the proof: the marker is a
+		// constant function of the mode, so only one of them can be the block's, and the
+		// focused row's own empty glyph settles which. The differing row is a stray.
+		const tied = box([`│ ${FOCUS} ${MARK} A │`, `│   ${SQUARE} B │`, `│   ${X} note │`]);
+		const got = readDialogFromPane(tied);
+		check("a known font drops a stray that ties the vote", JSON.stringify(got?.options.map(o => o.label)) === JSON.stringify(["A"]), JSON.stringify(got?.options.map(o => o.label)));
+		const multi = box([`│ ${FOCUS} ${SQUARE} A │`, `│   ${SQUARE} B │`, `│ ${X} note │`]);
+		const got2 = readDialogFromPane(multi);
+		check("a known font keeps a strict-lead row list and drops the stray", JSON.stringify(got2?.options.map(o => o.label)) === JSON.stringify(["A", "B"]), JSON.stringify(got2?.options.map(o => o.label)));
+	}
+
 	// A multi-question dialog renders a tab bar ending in `Submit`, but each question
 	// is independently single- or multi-select. The tab-bar `Submit` must not promote a
 	// single-select question — the marker glyph decides. Captured live from omp 18.8.9.

@@ -261,8 +261,15 @@ export function findOmpSession(config, idOrPath) {
 		let entries;
 		try {
 			entries = readdirSync(dir).filter(name => name.endsWith(".jsonl"));
-		} catch {
-			continue;
+		} catch (error) {
+			// Swallowing this would make an unreadable bucket look like an empty one, so
+			// `null` would mean "no such session" and the caller would fork a fresh thread
+			// over the wearer's resumed one — exactly what the contract above forbids.
+			// A missing bucket is ordinary (sessions are deleted), anything else is not.
+			if (error.code === "ENOENT" || error.code === "ENOTDIR") continue;
+			const wrapped = new Error(`could not scan the session bucket ${dir}: ${error.message}`);
+			wrapped.code = "SESSION_SCAN_FAILED";
+			throw wrapped;
 		}
 		for (const name of entries) {
 			const file = join(dir, name);

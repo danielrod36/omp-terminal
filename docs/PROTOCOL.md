@@ -257,8 +257,15 @@ Verified live: a tmux pane whose `pane_current_command` is `omp` hosts the TUI.
 - An `ask` renders as a bordered `╭─ Ask ─…` box: the question, then one row per
   option as `\uf054 \uf10c <label>`. `\uf054` is the focus marker; the option
   marker is a private-use glyph that differs between Nerd Font revisions
-  (`U+F096`, `U+F10C` both observed live), so the parser accepts any
-  private-use/box glyph rather than enumerating them.
+  (`U+F096`, `U+F10C` both observed live).
+- The block's marker is decided by the EMPTY markers its rows carry, on a strict
+  lead only, because the marker is a constant function of the dialog's mode. Any
+  other private-use glyph is a stray — an icon inside a wrapped question line —
+  and admitting one would inflate `focusRow` and shift every dictated index. When
+  the block renders no known marker at all the dialog uses an alternate icon set;
+  its checked-variant glyph cannot be named, so it is indistinguishable from a
+  stray and every row is kept rather than risking the loss of a real option. All
+  twelve live captures use only the known markers.
 - The dialog's key-hint bar distinguishes the two modes: `toggle` for
   multi-select, `select` for single-select — both draw the same marker when
   unchecked, so the hint bar is the only reliable signal.

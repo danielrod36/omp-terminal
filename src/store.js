@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { createLogger } from "./log.js";
@@ -35,18 +35,28 @@ export function saveStore(patch, path = CONFIG_PATH) {
 	const next = { ...current, ...patch };
 	try {
 		mkdirSync(dirname(path), { recursive: true });
-		writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+		// Write a sibling temp file and rename it into place: rename is atomic on POSIX,
+		// so a crash, a kill, or ENOSPC mid-write can never leave a truncated store. The
+		// token is a pairing credential — a torn write would silently rotate it, and the
+		// wearer's paired glasses would 401 with nothing in the log to explain it.
+		const temp = `${path}.${process.pid}.tmp`;
+		writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
 		try {
-			// writeFileSync honours an existing file's mode, so force 0600
-			// explicitly: the token is a credential and must not be group/world
-			// readable. A concurrent replace can make the chmod fail after the
-			// write landed — that is not a reason to report the save as failed.
-			chmodSync(path, 0o600);
+			// writeFileSync honours an existing file's mode, so force 0600 explicitly:
+			// the token is a credential and must not be group/world readable.
+			chmodSync(temp, 0o600);
 		} catch (error) {
-			log.warn(`could not tighten permissions on ${path}: ${error.message}`);
+			log.warn(`could not tighten permissions on ${temp}: ${error.message}`);
 		}
+		renameSync(temp, path);
 		return true;
 	} catch (error) {
+		// A failed save must not litter the config directory with temp files.
+		try {
+			unlinkSync(`${path}.${process.pid}.tmp`);
+		} catch {
+			/* never written, or already renamed */
+		}
 		log.warn(`could not persist config to ${path}: ${error.message}`);
 		return false;
 	}

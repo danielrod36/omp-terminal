@@ -53,6 +53,35 @@ export function linkSessions(left, right) {
 	log.debug(`linked session ids ${[...classLeft].join(" = ")}`);
 }
 
+/**
+ * Drop a session's ring once nothing can read it again.
+ *
+ * Every ring holds up to MAX_MESSAGES_PER_SESSION frames, and a fresh conversation
+ * mints a fresh id, so without this a long-lived bridge accumulates one ring per
+ * conversation ever started (measured: ~0.84 MB each) until it runs out of memory.
+ * The ring is kept while clients are attached or while it is an alias of a live id,
+ * so an app that reconnects to a just-finished session still gets its replay.
+ */
+export function dropSession(sessionId) {
+	const session = sessions.get(sessionId);
+	if (!session) return false;
+	if (session.clients.size > 0) return false;
+	const links = idLinks.get(sessionId);
+	if (links) {
+		// A linked class is live as long as any of its ids still has a ring.
+		for (const id of links) {
+			if (id === sessionId) continue;
+			if (sessions.has(id)) return false;
+		}
+		for (const id of links) idLinks.delete(id);
+	} else {
+		idLinks.delete(sessionId);
+	}
+	sessions.delete(sessionId);
+	log.debug(`dropped ring for ${sessionId}`);
+	return true;
+}
+
 /** Append to the ring and fan out live. Returns the primary ring id. */
 export function emit(sessionId, message) {
 	if (!sessionId) return 0;
