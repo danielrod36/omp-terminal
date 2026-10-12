@@ -188,13 +188,32 @@ export function addClient(sessionId, res, needReplay, lastEventId) {
 	const parsedLast = Number(lastEventId);
 	const replayFrom = Number.isFinite(parsedLast) && parsedLast > 0 ? parsedLast : needReplay ? 0 : session.lastDeliveredId;
 	let replayed = 0;
+	let replayStalled = false;
 	for (const entry of session.messages) {
 		if (entry.id > replayFrom) {
+			// The replay burst is bounded by the ring, but a client that is already far
+			// behind must not be handed 500 more frames to buffer: stop and let the live
+			// path drop it on the next emit.
+			if ((res.writableLength ?? 0) > MAX_CLIENT_BUFFER_BYTES) {
+				replayStalled = true;
+				break;
+			}
 			res.write(`id: ${entry.id}\ndata: ${JSON.stringify(entry.message)}\n\n`);
 			replayed++;
 		}
 	}
 	session.lastDeliveredId = session.nextId - 1;
+	if (replayStalled) {
+		log.warn(`client ${sessionId} stalled during replay; dropping it`);
+		try {
+			res.end?.();
+		} catch {
+			/* already gone */
+		}
+		return () => {
+			session.clients.delete(res);
+		};
+	}
 	session.clients.add(res);
 	log.info(
 		`client connected ${sessionId} (replayFrom=${replayFrom} replayed=${replayed}/${session.messages.length} live=${session.clients.size} total=${totalClients()})`,

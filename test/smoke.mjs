@@ -283,6 +283,26 @@ console.log("sse ring lifecycle");
 	events.linkSessions("ring-alias", "ring-canon");
 	events.emit("ring-canon", { type: "user_prompt", text: "x" });
 	check("a linked class drops as a unit", events.dropSession("ring-canon") === true);
+	// A client that stops reading must be dropped rather than buffered without bound:
+	// its frames stay in the ring and a reconnect replays them from the cursor.
+	const stalled = {
+		writableLength: 8 * 1024 * 1024,
+		// The `:ok` primer is sent before the client is registered, so it is expected;
+		// anything carrying a frame id is not.
+		write(chunk) {
+			if (String(chunk).startsWith("id: ")) throw new Error("must not buffer frames for a stalled client");
+		},
+		end() { this.ended = true; },
+		on() {}, once() {}, setHeader() {}, flushHeaders() {}, writableEnded: false, destroyed: false,
+	};
+	events.emit("ring-stall", { type: "user_prompt", text: "hi" });
+	events.addClient("ring-stall", stalled, false, null);
+	const before = events.totalClients();
+	events.emit("ring-stall", { type: "text_delta", text: "x" });
+	// The primer is sent before registration, so only the FRAME write is forbidden; the
+	// `write` above throws if one is attempted.
+	check("a client too far behind is dropped, not buffered", stalled.ended === true && events.totalClients() === before);
+
 	events.linkSessions("ring-alias2", "ring-canon2");
 	events.emit("ring-canon2", { type: "user_prompt", text: "x" });
 	events.addClient("ring-alias2", fake, false, null);
