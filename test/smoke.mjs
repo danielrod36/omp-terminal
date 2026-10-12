@@ -276,7 +276,10 @@ console.log("auth and path confinement");
 	writeFileSync(outside, `${JSON.stringify({ type: "title", title: "outside" })}\n`);
 	check("a transcript outside the sessions root is never resolved", findOmpSession(config, outside) === null);
 	check("nor via a traversal out of the root", findOmpSession(config, join(config.sessionsRoot, "..", "outside.jsonl")) === null);
-	check("the store scan still returns sessions", Array.isArray(listOmpSessions(config, 1)));
+	check("the store scan still returns sessions", Array.isArray(listOmpSessions(config, { limit: 1 })));
+	// A listing must not parse every transcript to return a few: the options object is the
+	// signature, and `limit` bounds the WORK, not just the result slice.
+	check("the store scan honours limit", listOmpSessions(config, { limit: 1 }).length <= 1, String(listOmpSessions(config, { limit: 1 }).length));
 }
 
 console.log("sse ring lifecycle");
