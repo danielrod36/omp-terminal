@@ -248,17 +248,14 @@ export function createBridge(config) {
 				sessionAliases.set(clientId, session.id);
 				linkSessions(clientId, session.id);
 			}
+			// Every `sessions.set` is keyed by the session's OWN id, so an entry found here
+			// can only be a different session that claimed the same canonical id. Losing that
+			// race must not orphan a running child: keep the incumbent, drop the one we just
+			// started, and leave the alias recorded above alone — it already points at the
+			// canonical id the incumbent is stored under.
 			const incumbent = sessions.get(session.id);
 			if (incumbent && incumbent !== session) {
-				// Losing this race must not orphan a running child: keep the incumbent and
-				// drop the one we just started. The alias and ring link recorded above point
-				// at the child being killed, so re-point them at the incumbent, or the caller's
-				// id resolves to nothing and its frames land in a ring nobody serves.
 				session.kill();
-				if (clientId && clientId !== session.id) {
-					sessionAliases.set(clientId, incumbent.id);
-					linkSessions(clientId, incumbent.id);
-				}
 				return incumbent;
 			}
 			sessions.set(session.id, session);

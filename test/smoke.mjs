@@ -9,7 +9,7 @@
  *
  * Usage: node test/smoke.mjs [--no-omp]
  */
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config.js";
@@ -25,8 +25,14 @@ const config = loadConfig({
 		token: "smoke-token",
 		logLevel: "warn",
 		attach: false,
+		// A temp store: nothing here may read or write the host's real ~/.omp/agent or
+		// ~/.omp-terminal, both of which hold the wearer's own data.
+		sessionsRoot: join(workDir, "sessions"),
 	},
+	store: {},
+	storePath: join(workDir, "config.json"),
 });
+mkdirSync(config.sessionsRoot, { recursive: true });
 configureLog({ level: "warn" });
 
 // Port 0 means "pick a free port"; probe the bound port after listen().
