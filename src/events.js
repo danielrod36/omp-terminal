@@ -56,7 +56,7 @@ function ensureClass(id) {
 	touchId(id);
 	let cls = sessions.get(id);
 	if (!cls) {
-		cls = { ids: new Set([id]), emitId: id, firstEmit: null, firstEmitWarned: false, messages: [], clients: new Set(), nextId: 1, lastDeliveredId: 0 };
+		cls = { ids: new Set([id]), emitId: id, ringOwners: new Set(), firstEmit: null, firstEmitWarned: false, messages: [], clients: new Set(), nextId: 1, lastDeliveredId: 0 };
 		sessions.set(id, cls);
 	}
 	return cls;
@@ -106,8 +106,15 @@ export function linkSessions(left, right) {
 		target.ids.add(id);
 		sessions.set(id, target);
 	}
-	// The survivor keeps the canonical id it emits under; a merged-away emit id becomes an
-	// alias like any other.
+	// Union the ids that have actually EMITTED, on either side. `emit` records the id it writes
+	// under, so this is exactly those ids. Only they can strand the ring — forgetting one would
+	// let a later emit under it mint a fresh class, dividing the frames and clients that just
+	// moved here. An id that merely had a class of its own is not protected: every linked id was
+	// once one, and protecting them all would defeat the cap.
+	const owners = new Set(target.ringOwners);
+	for (const id of source.ringOwners) owners.add(id);
+	if (owners.size === 0) owners.add(target.emitId); // nothing has emitted yet: keep the class id
+	target.ringOwners = owners;
 	// Move the clients too. Leaving them on `source` strands them: that object is no longer
 	// reachable from any id, so `emit` never fans to it, the backpressure sweep cannot see
 	// it, and `totalClients` undercounts — a client subscribed under a merged-away id would
@@ -129,12 +136,11 @@ export function linkSessions(left, right) {
 		for (const id of byUse) {
 			if (forgotten >= excess) break;
 			if (protectedIds.has(id)) continue;
-			// Never forget the id that actually owns the ring: the one that has emitted, or —
-			// before any emit — the id the class was created under. Protecting `emitId` alone
-			// would be wrong when the survivor tie-break picked an id that never emitted, and
-			// protecting only the two linked ids would rely on callers passing the canonical
-			// as one of them.
-			if (id === (target.firstEmit ?? target.emitId)) continue;
+			// Never forget an id that owns this ring: any id that has emitted on either side of a
+			// merge, plus the ids the classes were created under. Protecting a single id would be
+			// wrong after a both-emitted merge, and protecting only the two linked ids would rely
+			// on callers passing the canonical as one of them.
+			if ((target.ringOwners ?? new Set()).has(id)) continue;
 			// An id a client is subscribed under keeps its name: its stream and its polls both
 			// use it, and `getMessages` has no other way to find the class.
 			if ((idSubscribers.get(id) ?? 0) > 0) continue;
@@ -181,6 +187,7 @@ export function emit(sessionId, message) {
 	// silence every subscriber, and `0` is the "no session id" sentinel. The first emit under a
 	// brand-new class fixes the id that ring belongs to, which is the session's canonical id on
 	// every current path (the ring only receives frames after adoption).
+	cls.ringOwners.add(sessionId);
 	if (cls.firstEmit === null) {
 		// Remember which id first wrote to this class. Frames land in the class's one ring
 		// regardless, so this changes no behaviour.

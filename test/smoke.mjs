@@ -397,6 +397,21 @@ console.log("sse ring lifecycle");
 			`caller=${events.historyFromRing("tie-caller", 50).length}`);
 	}
 
+	// Both sides of a merge can have emitted. The loser's id must keep owning the shared ring: if
+	// the cap forgot it, a later emit under it would mint a fresh class and strand the frames and
+	// clients that just moved to the survivor.
+	{
+		events.emit("merge-src", { type: "result", text: "source frame" });
+		events.emit("merge-tgt", { type: "result", text: "target frame" });
+		events.linkSessions("merge-src", "merge-tgt");
+		for (let i = 0; i < 400; i++) events.linkSessions(`merge-junk-${i}`, "merge-tgt");
+		events.emit("merge-src", { type: "result", text: "after merge" });
+		const texts = events.historyFromRing("merge-tgt", 50).map(item => item.text);
+		check("a merged-away id that emitted is not stranded",
+			texts.includes("source frame") && texts.includes("after merge"),
+			JSON.stringify(texts));
+	}
+
 	// An emit under an alias of a multi-id class goes to the class's ONE ring: it must not be
 	// dropped (that would silence every subscriber) nor duplicated.
 	{
