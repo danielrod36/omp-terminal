@@ -208,6 +208,7 @@ npm run check        # every file parses (no dependencies, no build)
 npm run test:ci      # contract tests — what CI runs
 npm run test:attach  # pane-scraping unit tests (also CI)
 npm run test:live    # full loop: real omp child + real tmux TUI
+npm run test:permission  # a gated tool approved through the bridge
 ```
 
 `npm run test:ci` drives the real HTTP surface and asserts the Even wire
