@@ -620,14 +620,19 @@ function readAskFromPane(lines) {
 	// rather than answered blind.
 	if (box.options.length === 0 || box.focusRow < 0 || box.framedRows === 0) return null;
 	const prompt = box.header.length > 0 ? box.header[box.header.length - 1] : "";
-	// Multi-select signals, in order of reliability: the key-hint bar says
-	// `toggle`; more than one option is checked; or the dialog carries the multi
-	// header affordance. That affordance is the FIRST header line of a two-line
-	// header (`<id>  Submit` above the question) — single-select dialogs have a
-	// one-line header holding only the question — so a question that merely
-	// mentions the word "Submit" cannot promote a single-select dialog.
+	// Multi-select signals, most reliable first:
+	//  1. the option marker glyph — the square (U+F096) is multi, the circle
+	//     (U+F10C) is single, verified by a controlled A/B on one host;
+	//  2. the key-hint bar saying `toggle` rather than `select`;
+	//  3. any row rendered as a checked box;
+	//  4. the header's `Submit` affordance — the FIRST line of a two-line header
+	//     (`<id>  Submit` above the question), which single-select dialogs lack, so a
+	//     question merely mentioning the word cannot promote itself.
+	// The header check is a fallback only: the marker glyph is the primary signal
+	// and does not depend on wording that a future build could rephrase.
+	const glyphMulti = box.markerGlyph === "\uf096" ? true : box.markerGlyph === "\uf10c" ? false : null;
 	const headerSubmit = box.header.length >= 2 && /\bSubmit\s*$/.test(box.header[0]);
-	const multi = /\btoggle\b/.test(box.help) || box.options.filter(option => option.checked).length > 1 || headerSubmit;
+	const multi = glyphMulti ?? (/\btoggle\b/.test(box.help) || box.options.some(option => option.checked) || headerSubmit);
 	return {
 		kind: "question",
 		toolName: "ask",
@@ -700,12 +705,13 @@ function readAskBoxes(lines) {
 		}
 		// Select the real option rows by MARKER GLYPH, not by alignment.
 		//
-		// Measured across every live capture: within one dialog every option row uses
-		// the same marker glyph (U+F096 or U+F10C — never mixed), while the marker's
-		// column moves with the terminal padding and the focus glyph. An offset-based
-		// rule therefore fails in both directions: it drops a real option whose column
-		// shifted, and it can keep a stray row that merely happens to be indented like
-		// the options. Selecting on the glyph is stable under both.
+		// The marker glyph is a deterministic function of the dialog MODE, verified by
+		// a controlled A/B on one host seconds apart: a single-select dialog renders
+		// U+F10C (circle) and a multi-select one renders U+F096 (square), with U+F14A
+		// for a checked box. It is constant across a dialog's rows, while the marker's
+		// column moves with the focus glyph and the terminal padding — so an
+		// offset-based rule fails in both directions (it drops a real option whose
+		// column shifted, and keeps a stray row indented like the options).
 		//
 		// The focused row is always kept: it is an option by definition, and dropping it
 		// would leave focusRow at -1 and make the live dialog unanswerable.
@@ -724,9 +730,9 @@ function readAskBoxes(lines) {
 		}
 		// A checked row renders U+F14A where an unchecked one renders U+F096/U+F10C, so
 		// the checked glyph is a variant of the same marker rather than a different one.
-		const CHECKED_GLYPH = "\uf14a";
 		const sameMarker = (glyph, reference) =>
 			glyph === reference || (glyph === CHECKED_GLYPH && reference !== CHECKED_GLYPH);
+		box.markerGlyph = modalGlyph;
 		for (const row of candidates) {
 			// Keep the focused row unconditionally, plus any row sharing the block's
 			// marker glyph. A stray row with a different glyph is dropped.
@@ -775,14 +781,26 @@ const FOCUS = /[\uf054\u276f\u25b6]/;
 /**
  * True for the glyphs omp uses as option markers.
  *
- * Measured across three live captures (single-select, multi-select, approval):
- * every marker is a Nerd Font private-use glyph — U+F096 and U+F10C observed —
- * while the focus glyph is always U+F054. Geometric shapes and dingbats are NOT
- * markers on this wire, so accepting them risked reading a label like `★ Starred`
- * as a marker row; only the private-use area is treated as a marker.
+ * The marker identifies the dialog's option rows and its mode. Verified by a
+ * controlled A/B on one host, seconds apart, same omp build and pane width:
+ *   U+F10C  empty circle  — single-select
+ *   U+F096  empty square  — multi-select
+ *   U+F14A  checked box   — a selected row in either mode
+ * Every marker is a Nerd Font private-use glyph and the focus glyph is always
+ * U+F054. Geometric shapes and dingbats are NOT markers on this wire, so accepting
+ * them would let a label like `★ Starred` read as a marker row; only the
+ * private-use area is treated as a marker.
  */
+const MARKER_GLYPHS = new Set(["\uf10c", "\uf096", "\uf14a"]);
+/** The checked variant, which replaces the empty marker once a row is selected. */
+const CHECKED_GLYPH = "\uf14a";
+
 function isMarker(glyph) {
 	if (!glyph) return false;
+	if (MARKER_GLYPHS.has(glyph)) return true;
+	// Any other private-use glyph is tolerated as a marker so a font build with a
+	// different icon set still parses; the glyph vote below then decides whether it
+	// belongs to this dialog's option rows.
 	const code = glyph.codePointAt(0);
 	return code >= 0xe000 && code <= 0xf8ff;
 }

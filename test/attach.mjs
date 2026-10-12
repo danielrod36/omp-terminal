@@ -73,15 +73,20 @@ console.log("dialog properties");
 {
 	const FOCUS = "\uf054";
 	const MARK = "\uf10c";
+	const SQUARE = "\uf096";
 	const CHECK = "\uf14a";
 	const ICON = "\uf2c7";
+	// The marker glyph encodes the mode (measured by controlled A/B): a multi-select
+	// dialog renders U+F096 (square), a single-select one U+F10C (circle), and a
+	// selected row U+F14A.
 	const build = ({ labels, focus = 0, checked = [], multi = false, headerIcon = false, question = "Which?", hint = "select" }) => {
+		const shape = multi ? SQUARE : MARK;
 		const lines = ["╭─ Ask ─╮"];
 		if (multi) lines.push(`│ ${headerIcon ? ICON + " " : ""}colour  Submit │`);
 		lines.push(`│ ${question} │`, "├──────┤");
 		labels.forEach((label, index) => {
 			const cursor = index === focus ? `${FOCUS} ` : "  ";
-			const marker = checked.includes(index) ? CHECK : MARK;
+			const marker = checked.includes(index) ? CHECK : shape;
 			lines.push(`│ ${cursor}${marker} ${label} │`);
 		});
 		lines.push("│      │", "├──────┤");
@@ -138,14 +143,18 @@ console.log("answer paths");
 	const FOCUS = "\uf054";
 	const MARK = "\uf10c";
 	const CHECK = "\uf14a";
+	const SQUARE = "\uf096";
 	const { AttachSession } = await import("../src/attach.js");
+	// The marker glyph encodes the mode (measured by A/B): square for multi-select,
+	// circle for single, checked box for a selected row.
 	const render = (labels, focus, checked, multi) => {
+		const shape = multi ? SQUARE : MARK;
 		const lines = ["╭─ Ask ─╮"];
 		if (multi) lines.push("│  q  Submit │");
 		lines.push("│ Which? │", "├──────┤");
 		labels.forEach((label, index) => {
 			const cursor = index === focus ? `${FOCUS} ` : "  ";
-			const marker = checked.includes(index) ? CHECK : MARK;
+			const marker = checked.includes(index) ? CHECK : shape;
 			lines.push(`│ ${cursor}${marker} ${label} │`);
 		});
 		lines.push("│      │", "├──────┤", `│ ${multi ? "toggle · submit" : "select"} · ↑/↓ │`, "╰──────╯");
@@ -201,7 +210,7 @@ console.log("answer paths");
 	// A recommended option renders as `Yes (Recommended)`; the wearer dictates what
 	// they see, so the display suffix must not block the match.
 	{
-		const recommended = ["\u256d\u2500 Ask \u2500\u256e", "\u2502  tests    runner    Submit \u2502", "\u2502 Do you want tests? \u2502", "\u251c\u2500\u2500\u2500\u2504", `\u2502 ${FOCUS} ${MARK} Yes (Recommended) \u2502`, `\u2502   ${MARK} No \u2502`, `\u2502   ${MARK} Other (type your own) \u2502`, "\u2502  \u2502", "\u251c\u2500\u2500\u2500\u2504", "\u2502 select \u00b7 \u2190/\u2192 question \u00b7 \u2191/\u2193 \u2502", "\u2570\u2500\u2500\u2500\u256f"].join("\n");
+		const recommended = ["\u256d\u2500 Ask \u2500\u256e", "\u2502  tests    runner    Submit \u2502", "\u2502 Do you want tests? \u2502", "\u251c\u2500\u2500\u2500\u2504", `\u2502 ${FOCUS} ${SQUARE} Yes (Recommended) \u2502`, `\u2502   ${SQUARE} No \u2502`, `\u2502   ${MARK} Other (type your own) \u2502`, "\u2502  \u2502", "\u251c\u2500\u2500\u2500\u2504", "\u2502 select \u00b7 \u2190/\u2192 question \u00b7 \u2191/\u2193 \u2502", "\u2570\u2500\u2500\u2500\u256f"].join("\n");
 		const parsed = readDialogFromPane(recommended);
 		check("recommended suffix is kept in the label", parsed?.options[0]?.label === "Yes (Recommended)", JSON.stringify(parsed?.options.map(o => o.label)));
 		check("recommended suffix is not read as a multi signal alone", parsed?.multi === true, String(parsed?.multi));
