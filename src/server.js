@@ -611,9 +611,9 @@ export function createBridge(config) {
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
 			const after = Number(url.searchParams.get("after")) || 0;
 			const session = dropIfDead(getLive(sessionId));
-			// Resolve through the alias/class the same way SSE does, so a polling id that the
+			// Resolve through the live session the same way SSE does, so a polling id that the
 			// lookup cap forgot still reads its session's ring instead of [].
-			const target = session?.id ?? getLive(sessionId)?.id ?? sessionId;
+			const target = session?.id ?? sessionId;
 			if (target !== sessionId) linkSessions(sessionId, target);
 			return sendJson(res, 200, {
 				messages: getMessages(target, after),

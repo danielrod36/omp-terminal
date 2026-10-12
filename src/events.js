@@ -56,7 +56,7 @@ function ensureClass(id) {
 	touchId(id);
 	let cls = sessions.get(id);
 	if (!cls) {
-		cls = { ids: new Set([id]), messages: [], clients: new Set(), nextId: 1, lastDeliveredId: 0 };
+		cls = { ids: new Set([id]), emitId: id, messages: [], clients: new Set(), nextId: 1, lastDeliveredId: 0 };
 		sessions.set(id, cls);
 	}
 	return cls;
@@ -78,11 +78,15 @@ export function linkSessions(left, right) {
 	// longest keep their ring. Merging the other way is harmless for the ring, which is
 	// shared either way, but this keeps the survivor stable across repeated links.
 	const [target, source] = leftClass.ids.size >= rightClass.ids.size ? [leftClass, rightClass] : [rightClass, leftClass];
-	// Both sides can already hold frames (an emit before the link). Keep BOTH histories in
-	// time order instead of dropping one: a client still holding a `Last-Event-ID` from
-	// either ring must find it, and ids stay monotonic across the merge so no replay skips a
-	// frame. Renumbering the source entries is what makes the two id spaces comparable — they
-	// were minted independently, so their ids overlap.
+	// Both sides can already hold frames (an emit before the link). Keep BOTH histories rather
+	// than dropping one, renumbering the source onto the target's id space so the ids stay
+	// monotonic and unique across the merge. The merged order is each side's own emission
+	// order (target first), which is the best available: the entries carry no timestamp, and
+	// no current server path emits into both classes before linking them.
+	//
+	// A cursor minted on the source ring therefore no longer names the same frame. It is
+	// clamped forward rather than silently re-delivering: anything at or below the renumbered
+	// end of the source range is treated as already seen.
 	if (source.messages.length > 0) {
 		const base = target.nextId;
 		const merged = source.messages.map(entry => ({ id: entry.id + base - 1, message: entry.message }));
@@ -96,6 +100,8 @@ export function linkSessions(left, right) {
 		target.ids.add(id);
 		sessions.set(id, target);
 	}
+	// The survivor keeps the canonical id it emits under; a merged-away emit id becomes an
+	// alias like any other.
 	// Move the clients too. Leaving them on `source` strands them: that object is no longer
 	// reachable from any id, so `emit` never fans to it, the backpressure sweep cannot see
 	// it, and `totalClients` undercounts — a client subscribed under a merged-away id would
@@ -117,6 +123,11 @@ export function linkSessions(left, right) {
 		for (const id of byUse) {
 			if (forgotten >= excess) break;
 			if (protectedIds.has(id)) continue;
+			// Never forget the id the class emits under. Relying on the caller to pass it as
+			// one of the two linked ids would let a future caller that links two aliases lose
+			// the canonical id, and the next emit under it would mint a fresh class — stranding
+			// the ring and its clients.
+			if (id === target.emitId) continue;
 			// An id a client is subscribed under keeps its name: its stream and its polls both
 			// use it, and `getMessages` has no other way to find the class.
 			if ((idSubscribers.get(id) ?? 0) > 0) continue;
@@ -251,7 +262,10 @@ export function addClient(sessionId, res, needReplay, lastEventId) {
 
 	const cls = ensureClass(sessionId);
 	const parsedLast = Number(lastEventId);
-	const replayFrom = Number.isFinite(parsedLast) && parsedLast > 0 ? parsedLast : needReplay ? 0 : cls.lastDeliveredId;
+	// A cursor past the ring's newest id came from a different (or superseded) ring: clamping
+	// to the newest means "nothing new", instead of replaying the whole ring again.
+	const cursor = Number.isFinite(parsedLast) && parsedLast > 0 ? Math.min(parsedLast, cls.nextId - 1) : null;
+	const replayFrom = cursor ?? (needReplay ? 0 : cls.lastDeliveredId);
 	let replayed = 0;
 	let replayStalled = false;
 	for (const entry of cls.messages) {
