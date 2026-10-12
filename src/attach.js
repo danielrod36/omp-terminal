@@ -10,6 +10,13 @@ const log = createLogger("attach");
 const run = promisify(execFile);
 
 /**
+ * Most bytes of an unterminated trailing transcript line to keep re-reading between polls.
+ * A trailing fragment is deliberately left unconsumed so a record still being flushed is not
+ * dropped, but re-reading it costs I/O proportional to the LINE, and real lines reach 1.9 MB.
+ */
+const MAX_CARRY_BYTES = 1024 * 1024;
+
+/**
  * Attach-to-live mode: steer an interactive omp TUI already running under tmux.
  *
  * Verified live against omp v18.8.7:
@@ -266,10 +273,17 @@ export class AttachSession {
 					lineStart = breakAt + 1;
 				}
 				carry = lineStart < combined.length ? Buffer.from(combined.subarray(lineStart)) : Buffer.alloc(0);
-				// Only the bytes belonging to complete records are consumed. A
-				// trailing fragment stays unread so the next poll re-reads it whole:
-				// advancing past it would drop the record once the writer finishes
-				// it, which is exactly what a half-flushed line looks like.
+				// Only the bytes belonging to complete records are consumed. A trailing fragment
+				// stays unread so the next poll re-reads it whole: advancing past it would drop the
+				// record once the writer finishes it, which is exactly what a half-flushed line
+				// looks like. But a transcript line can be very long (measured maximum on this host:
+				// 1.9 MB), and re-reading it every poll costs I/O proportional to the LINE rather
+				// than to the new bytes. Past the cap the fragment is given up as unparseable
+				// rather than re-read forever — it cannot be a record boundary we owe the wearer.
+				if (carry.length > MAX_CARRY_BYTES) {
+					log.warn(`transcript line exceeds ${MAX_CARRY_BYTES} bytes; skipping it`);
+					carry = Buffer.alloc(0);
+				}
 				this.offset = cursor - carry.length;
 			}
 		} catch (error) {
