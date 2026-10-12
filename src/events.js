@@ -180,12 +180,14 @@ export function emit(sessionId, message) {
 	// brand-new class fixes the id that ring belongs to, which is the session's canonical id on
 	// every current path (the ring only receives frames after adoption).
 	if (cls.firstEmit === null) {
-		// Remember the id that first wrote to this class. Frames land in the class's one ring
-		// either way, so this changes no behaviour — it is a diagnostic for the one convention
-		// the call sites follow by hand: that a ring starts under the session's canonical id,
-		// because frames only begin after adoption. A swapped link argument would show up here.
+		// Remember which id first wrote to this class. Frames land in the class's one ring
+		// regardless, so this changes no behaviour.
 		cls.firstEmit = sessionId;
 	} else if (cls.firstEmit !== sessionId && cls.ids.size > 1) {
+		// Diagnostic only, and a narrow one: it reports an emit id that changed over time, as a
+		// caller id would if some future path emitted before adoption. It cannot see a swapped
+		// `linkSessions` argument, because that decides `emitId` before any emit has happened —
+		// and that case needs no warning anyway, since a shared ring delivers to every id.
 		log.warn(`emit under ${sessionId} after the class first emitted under ${cls.firstEmit}; frames share the ring but the id differs`);
 	}
 	const data = JSON.stringify(message);
