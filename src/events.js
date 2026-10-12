@@ -96,6 +96,11 @@ export function linkSessions(left, right) {
 		if (sessions.get(id)?.clients.size > 0) continue; // a live SSE client keeps its id
 		target.delete(id);
 		idLinks.delete(id);
+		// Release the evicted id's ring as well. Leaving it would mean the cap bounds
+		// fan-out but not memory: the ring holds up to MAX_MESSAGES_PER_SESSION frames, and
+		// nothing else ever frees an id the class walk can no longer reach (measured 591 MB
+		// retained from 800 evicted, fully-buffered ids).
+		sessions.delete(id);
 		evicted++;
 		log.warn(`evicted stale session id ${id} from a class at the ${MAX_IDS_PER_CLASS}-id cap`);
 	}

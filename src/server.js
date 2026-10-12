@@ -179,7 +179,15 @@ export function createBridge(config) {
 	async function ensureOwned(sessionId, { cwd, resumePath } = {}) {
 		dropIfDead(getLive(sessionId));
 		const existing = getLive(sessionId);
-		if (existing) return existing;
+		if (existing) {
+			// The class cap can drop an id while its canonical session lives on. A caller
+			// re-prompting under that id must rejoin, or it is silently muted for good.
+			if (sessionId && sessionId !== existing.id) {
+				sessionAliases.set(sessionId, existing.id);
+				linkSessions(sessionId, existing.id);
+			}
+			return existing;
+		}
 		if (pendingSpawns.has(sessionId)) return pendingSpawns.get(sessionId);
 		const spawnPromise = (async () => {
 			// A scan failure must not masquerade as "unknown id": starting fresh
@@ -436,6 +444,14 @@ export function createBridge(config) {
 		if (req.method === "GET" && path === "/api/events") {
 			const sessionId = url.searchParams.get("sessionId");
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId' query parameter" });
+			// Subscribe under the canonical session, so an id that the class cap evicted still
+			// receives the frames it is asking for rather than a stale replay and then silence.
+			const canonical = sessionAliases.get(sessionId) ?? sessionId;
+			const target = getLive(sessionId)?.id ?? canonical;
+			if (target && target !== sessionId) {
+				sessionAliases.set(sessionId, target);
+				linkSessions(sessionId, target);
+			}
 			const dispose = addClient(
 				sessionId,
 				res,
