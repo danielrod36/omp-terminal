@@ -1,5 +1,5 @@
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
 import { createLogger } from "./log.js";
 
 const log = createLogger("sessions");
@@ -235,13 +235,51 @@ export function listOmpSessions(config, { limit = 50 } = {}) {
  * reported as `null` — that would silently drop a resume the wearer expected to
  * find; it throws a tagged error instead, which callers surface or retry.
  */
+/**
+ * A session id is opaque: a uuid, or any id-shaped token without a path separator.
+ *
+ * Distinguishing an id from a path is what keeps a client-supplied path from ever
+ * reaching the filesystem, even when it points inside the sessions root.
+ */
+function isSessionId(value) {
+	return Boolean(value) && !value.includes("/") && !value.includes("\\");
+}
+
+/**
+ * True when `file` resolves inside the configured sessions root.
+ *
+ * Everything read as a transcript must pass this: the id comes from an HTTP path
+ * segment, and a bare `existsSync` would let it name any file on the host.
+ */
+function isInsideSessionsRoot(config, file) {
+	const root = config.sessionsRoot;
+	if (!root) return false;
+	let resolvedRoot;
+	let resolvedFile;
+	try {
+		resolvedRoot = resolve(root);
+		resolvedFile = resolve(file);
+	} catch {
+		return false;
+	}
+	const prefix = resolvedRoot.endsWith(sep) ? resolvedRoot : resolvedRoot + sep;
+	return resolvedFile === resolvedRoot || resolvedFile.startsWith(prefix);
+}
+
 export function findOmpSession(config, idOrPath) {
 	if (!idOrPath) return null;
-	if (idOrPath.endsWith(".jsonl") && existsSync(idOrPath)) {
+	const root = config.sessionsRoot;
+	// A transcript is only ever a file INSIDE the sessions root. The id reaches this
+	// function from an HTTP path segment, so accepting any existing `.jsonl` let a token
+	// holder read arbitrary files on the host (verified: an absolute path outside the root
+	// was served in full). Compare resolved paths so `..` cannot climb out either.
+	// A path is only honoured when the CALLER supplied one (a live session's transcript,
+	// which the bridge read from omp itself). A bare id — the only shape an HTTP path
+	// segment may take — never names a file, so it cannot become a path here at all.
+	if (!isSessionId(idOrPath) && idOrPath.endsWith(".jsonl") && isInsideSessionsRoot(config, idOrPath) && existsSync(idOrPath)) {
 		const head = parseHead(idOrPath);
 		return { ...head, path: idOrPath };
 	}
-	const root = config.sessionsRoot;
 	if (!existsSync(root)) return null;
 	let rootEntries;
 	try {

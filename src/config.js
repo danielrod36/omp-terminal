@@ -2,6 +2,9 @@ import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { join, resolve } from "node:path";
 import { loadStore, saveStore } from "./store.js";
+import { createLogger } from "./log.js";
+
+const log = createLogger("config");
 
 /** Built-in defaults, mirrored by the startup banner and README. */
 export const DEFAULTS = {
@@ -51,6 +54,14 @@ export function loadConfig({ env = process.env, flags = {}, store = loadStore() 
 	// The store is what keeps the glasses paired across restarts; without it a
 	// fresh random token silently invalidates every stored pairing.
 	let token = pick(flags.token, "BRIDGE_TOKEN", undefined);
+	// An empty token must never reach the server: `(bearer ?? query) === token` would then
+	// authorize `?token=` from any caller, and `--token "$VAR"` with VAR unset is exactly
+	// how an empty value arrives. The env path already falls back on ""; treat the flag the
+	// same way, so the failure is "generated a token" rather than "auth is off".
+	if (token === "") {
+		log.warn("ignoring an empty BRIDGE_TOKEN/--token; generating one instead");
+		token = undefined;
+	}
 	let tokenSource = token !== undefined ? (flags.token !== undefined ? "flag" : "env") : undefined;
 	if (token === undefined && typeof store.token === "string" && store.token) {
 		token = store.token;

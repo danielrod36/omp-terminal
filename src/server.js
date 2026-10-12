@@ -178,11 +178,24 @@ export function createBridge(config) {
 					found = findOmpSession(config, sessionId)?.path ?? null;
 				} catch (error) {
 					if (error.code === "SESSION_SCAN_FAILED") {
-						const wrapped = new Error(`could not resolve session ${sessionId ?? "-"}: ${error.message}`);
+						// The scan message embeds an absolute bucket path; it belongs in the log,
+						// not in a body a token holder can read.
+						log.warn(`could not resolve session ${sessionId ?? "-"}: ${error.message}`);
+						const wrapped = new Error("could not scan the session store");
 						wrapped.statusCode = 503;
 						throw wrapped;
 					}
 					throw error;
+				}
+			}
+			// The scan may have resolved this id to a transcript another child already
+			// owns: two different client ids that prefix-match one transcript would
+			// otherwise each spawn a child, and the second `sessions.set` below would
+			// orphan the first past `bridge.close()`. Adopt the existing owner instead.
+			if (found) {
+				for (const existing of sessions.values()) {
+					const known = existing.sessionFile ?? existing.transcriptPath;
+					if (known && known === found) return existing;
 				}
 			}
 			const args = [];
@@ -213,6 +226,13 @@ export function createBridge(config) {
 			if (clientId && clientId !== session.id) {
 				sessionAliases.set(clientId, session.id);
 				linkSessions(clientId, session.id);
+			}
+			const incumbent = sessions.get(session.id);
+			if (incumbent && incumbent !== session) {
+				// Losing this race must not orphan a running child: keep the incumbent and
+				// drop the one we just started.
+				session.kill();
+				return incumbent;
 			}
 			sessions.set(session.id, session);
 			if (clientId && clientId !== session.id) sessions.delete(clientId);

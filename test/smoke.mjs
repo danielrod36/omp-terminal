@@ -9,7 +9,7 @@
  *
  * Usage: node test/smoke.mjs [--no-omp]
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config.js";
@@ -263,6 +263,22 @@ console.log("tunnel provider parsing");
 	}
 }
 
+console.log("auth and path confinement");
+{
+	// An empty token must never disable auth: `?token=` would satisfy it from any caller.
+	const empty = loadConfig({ flags: { token: "" }, store: {} });
+	check("an empty --token generates one instead of disabling auth", empty.token.length > 0 && empty.tokenSource === "generated", `${JSON.stringify(empty.token)}/${empty.tokenSource}`);
+
+	// A session id is opaque. A path that escapes the sessions root must not be read,
+	// even though it exists and ends in .jsonl.
+	const { findOmpSession, listOmpSessions } = await import("../src/sessions.js");
+	const outside = join(workDir, "outside.jsonl");
+	writeFileSync(outside, `${JSON.stringify({ type: "title", title: "outside" })}\n`);
+	check("a transcript outside the sessions root is never resolved", findOmpSession(config, outside) === null);
+	check("nor via a traversal out of the root", findOmpSession(config, join(config.sessionsRoot, "..", "outside.jsonl")) === null);
+	check("the store scan still returns sessions", Array.isArray(listOmpSessions(config, 1)));
+}
+
 console.log("sse ring lifecycle");
 {
 	// A long-lived bridge mints a fresh id per conversation, so a ring that is never
@@ -302,6 +318,32 @@ console.log("sse ring lifecycle");
 	// The primer is sent before registration, so only the FRAME write is forbidden; the
 	// `write` above throws if one is attempted.
 	check("a client too far behind is dropped, not buffered", stalled.ended === true && events.totalClients() === before);
+
+	// Dropping a stalled client must also stop its heartbeat: a timer still writing after
+	// end() raises ERR_STREAM_WRITE_AFTER_END asynchronously, which is an unhandled 'error'
+	// event and took the whole bridge down. The teardown is observable via the dispose
+	// marker, so assert it ran rather than waiting 15 s for the tick.
+	const stalledRes = {
+		writableLength: 0, // starts healthy, so it registers and gets a heartbeat
+		write() {},
+		end() { this.ended = true; },
+		on() {}, once() {}, setHeader() {}, flushHeaders() {}, writableEnded: false, destroyed: false,
+	};
+	events.emit("ring-hb", { type: "user_prompt", text: "hi" });
+	events.addClient("ring-hb", stalledRes, false, null);
+	// It falls behind only once attached, which is the case the emit-path drop handles.
+	stalledRes.writableLength = 8 * 1024 * 1024;
+	const marker = Symbol.for("omp-terminal.dispose");
+	const armed = typeof stalledRes[marker] === "function";
+	events.emit("ring-hb", { type: "text_delta", text: "x" });
+	// `armed` proves it was registered with a heartbeat; the marker disappearing proves the
+	// teardown ran. Nothing here waits out a 15 s tick, so asserting only `ended` would pass
+	// without the teardown and miss the write-after-end crash entirely.
+	check(
+		"dropping a stalled client stops its heartbeat",
+		armed && stalledRes.ended === true && stalledRes[marker] === undefined,
+		`armed=${armed} ended=${stalledRes.ended} tornDown=${stalledRes[marker] === undefined}`,
+	);
 
 	events.linkSessions("ring-alias2", "ring-canon2");
 	events.emit("ring-canon2", { type: "user_prompt", text: "x" });

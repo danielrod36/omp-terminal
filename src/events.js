@@ -17,6 +17,12 @@ const HEARTBEAT_MS = 15_000;
  */
 const MAX_CLIENT_BUFFER_BYTES = 4 * 1024 * 1024;
 
+/**
+ * Marker for the teardown attached to each attached response, so any path that removes a
+ * client can also stop its heartbeat. Registry-global so a test can observe it.
+ */
+const DISPOSE = Symbol.for("omp-terminal.dispose");
+
 const sessions = new Map();
 /** Equivalence classes of session ids that must receive each other's frames. */
 const idLinks = new Map();
@@ -121,6 +127,9 @@ export function emit(sessionId, message) {
 				} catch {
 					/* already gone */
 				}
+				// Stop its heartbeat as well: a timer still writing after `end()` would
+				// raise an unhandled 'error' event and crash the bridge.
+				client[DISPOSE]?.();
 				session.clients.delete(client);
 				dead++;
 				continue;
@@ -128,6 +137,7 @@ export function emit(sessionId, message) {
 			try {
 				client.write(`id: ${id}\ndata: ${data}\n\n`);
 			} catch {
+				client[DISPOSE]?.();
 				session.clients.delete(client);
 				dead++;
 			}
@@ -214,23 +224,42 @@ export function addClient(sessionId, res, needReplay, lastEventId) {
 			session.clients.delete(res);
 		};
 	}
+	// The teardown lives on the response because `emit` has no reference to this closure,
+	// and every path that removes the client must run it — otherwise the heartbeat keeps
+	// ticking after `end()` and the resulting ERR_STREAM_WRITE_AFTER_END is an unhandled
+	// 'error' event that takes the whole bridge down.
+	let heartbeat = null;
+	let disposed = false;
+	const dispose = () => {
+		if (disposed) return;
+		disposed = true;
+		if (heartbeat) clearInterval(heartbeat);
+		session.clients.delete(res);
+		// Clear the marker so a caller can tell a torn-down client from a live one: a
+		// heartbeat still ticking after `end()` is the crash this guards against.
+		delete res[DISPOSE];
+	};
+	res[DISPOSE] = dispose;
+
+	heartbeat = setInterval(() => {
+		try {
+			res.write(":heartbeat\n\n");
+		} catch {
+			dispose();
+		}
+	}, HEARTBEAT_MS);
+
 	session.clients.add(res);
 	log.info(
 		`client connected ${sessionId} (replayFrom=${replayFrom} replayed=${replayed}/${session.messages.length} live=${session.clients.size} total=${totalClients()})`,
 	);
 
-	const heartbeat = setInterval(() => {
-		try {
-			res.write(":heartbeat\n\n");
-		} catch {
-			clearInterval(heartbeat);
-			session.clients.delete(res);
-		}
-	}, HEARTBEAT_MS);
+	// A write that fails asynchronously (the socket died under us) must not become an
+	// unhandled 'error' event either.
+	res.on?.("error", () => dispose());
 
 	return () => {
-		clearInterval(heartbeat);
-		session.clients.delete(res);
+		dispose();
 		log.info(`client disconnected ${sessionId} (total=${totalClients()})`);
 	};
 }

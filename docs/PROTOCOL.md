@@ -109,6 +109,17 @@ Without rule 3, a frame broadcast while the glasses were disconnected is lost
 forever. A content frame (`text_delta` / `result`) broadcast with no live client
 is logged as a warning, not silently swallowed.
 
+A ring is freed once nothing can read it again — no attached client, and no live
+id in its equivalence class — because a fresh conversation mints a fresh id and a
+long-lived bridge would otherwise retain one 500-frame ring per conversation ever
+started.
+
+A client that completes the handshake and then stops reading never trips
+`close`, so it is dropped once more than 4 MiB is buffered for it, during the
+replay burst as well as live. Nothing is lost: the ring keeps the frames and a
+reconnect replays them from the cursor above, which is the same path a dark-lens
+reconnect already takes.
+
 ### 1.6 Pairing durability
 
 The stock server persists a pairing token in `~/.even-terminal/config.json`
@@ -122,6 +133,11 @@ flaky with no visible error. `omp-terminal` matches the stock behaviour —
 generate once, persist to `~/.omp-terminal/config.json` (`0600`), reuse — and
 reports the provenance in the banner (`(config)` / `(generated)` / `(flag)` /
 `(env)`).
+
+The store is written to a sibling temp file and renamed into place, so a crash or
+a full disk during a save cannot leave a truncated file whose parse error would
+be swallowed and whose next boot would rotate the token — the failure this
+section exists to prevent.
 
 Quick tunnels are the residue: pinggy and cloudflare **quick** tunnels mint a new
 hostname per run (`*.free.pinggy.net`, `*.trycloudflare.com`), so the public URL
