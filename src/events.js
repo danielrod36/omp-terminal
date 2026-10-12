@@ -56,7 +56,7 @@ function ensureClass(id) {
 	touchId(id);
 	let cls = sessions.get(id);
 	if (!cls) {
-		cls = { ids: new Set([id]), emitId: id, messages: [], clients: new Set(), nextId: 1, lastDeliveredId: 0 };
+		cls = { ids: new Set([id]), emitId: id, firstEmit: null, messages: [], clients: new Set(), nextId: 1, lastDeliveredId: 0 };
 		sessions.set(id, cls);
 	}
 	return cls;
@@ -81,6 +81,11 @@ export function linkSessions(left, right) {
 	const leftWins = leftClass.messages.length > rightClass.messages.length ||
 		(leftClass.messages.length === rightClass.messages.length && leftClass.ids.size > rightClass.ids.size);
 	const [target, source] = leftWins ? [leftClass, rightClass] : [rightClass, leftClass];
+	// Record the order the two sides were linked in, so `emit` can tell the canonical (second)
+	// id from a caller id. Every call site passes `(callerId, canonicalId)`, but that convention
+	// is otherwise unenforced: a swapped call would put frames in a ring keyed on a provisional
+	// id. The loser is the source side, so the survivor's canonical is whichever the source map
+	// still points at after the remap.
 	// Both sides can already hold frames (an emit before the link). Keep BOTH histories rather
 	// than dropping one, renumbering the source onto the target's id space so the ids stay
 	// monotonic and unique across the merge. The merged order is each side's own emission
@@ -88,13 +93,10 @@ export function linkSessions(left, right) {
 	// no current server path emits into both classes before linking them.
 	//
 	// A cursor minted on the source ring no longer names the same frame, so the first read
-	// after such a merge can re-deliver already-seen source frames. That is unreachable today
-	// (every emit call site uses a canonical id, so no ring holds frames before it is linked),
-	// and re-delivering is the safe direction for the dark-window contract: a repeat frame is
-	// idempotent for the lens, a skipped one is lost.
-	//
-	// The invariant is enforced below rather than assumed: `emit` refuses to write under an
-	// alias, so a class can only ever hold frames under the id it emits under.
+	// after such a merge can re-deliver already-seen source frames. Today no server path emits
+	// into both classes before linking them, so the case does not arise; re-delivering is also
+	// the safe direction for the dark-window contract, since a repeat frame is idempotent for
+	// the lens while a skipped one is lost. Enforced by `firstEmit` below.
 	if (source.messages.length > 0) {
 		const base = target.nextId;
 		const merged = source.messages.map(entry => ({ id: entry.id + base - 1, message: entry.message }));
@@ -177,11 +179,17 @@ export function dropSession(sessionId) {
 export function emit(sessionId, message) {
 	if (!sessionId) return 0;
 	const cls = ensureClass(sessionId);
-	// The class owns one ring regardless of which of its ids the caller emits under, so an
-	// alias write is redirected to the class's own id rather than refused: the frame fans out
-	// exactly once either way, and refusing would silence every subscriber.
-	if (cls.ids.size > 1 && sessionId !== cls.emitId) {
-		log.debug(`emit under alias ${sessionId} recorded on ${cls.emitId}`);
+	// The class owns one ring whatever id the caller emits under, so an alias write lands in
+	// the same place and fans out exactly once. It is recorded, not refused: refusing would
+	// silence every subscriber, and `0` is the "no session id" sentinel. The first emit under a
+	// brand-new class fixes the id that ring belongs to, which is the session's canonical id on
+	// every current path (the ring only receives frames after adoption).
+	if (cls.firstEmit === null) {
+		// The id that first writes to a class is the one its ring belongs to. On every current
+		// path that is the session's canonical id, because frames only start after adoption.
+		cls.firstEmit = sessionId;
+	} else if (cls.firstEmit !== sessionId && cls.ids.size > 1) {
+		log.warn(`emit under ${sessionId} after the class first emitted under ${cls.firstEmit}; frames share the ring but the id differs`);
 	}
 	const data = JSON.stringify(message);
 	const id = cls.nextId++;
