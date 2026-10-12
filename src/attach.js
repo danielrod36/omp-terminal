@@ -526,7 +526,10 @@ export class AttachSession {
 			log.warn(`attach ${this.id} could not find an ${approved ? "approve" : "deny"} row; refusing to press Enter`);
 			return { ok: false, reason: `the card does not offer a row matching ${approved ? "approve" : "deny"}` };
 		}
-		const steps = target - (dialog.focusedIndex ?? 0);
+		// No `?? 0` here: the guard above already rejects anything that is not a non-negative
+		// integer, so a fallback would be unreachable — and an unreachable default is what let the
+		// focus bug hide in the first place.
+		const steps = target - dialog.focusedIndex;
 		if (!(await this.#moveCursor(steps))) return { ok: false, reason: "the cursor could not be moved to the selected row" };
 		if (!(await this.send("Enter", { enter: false }))) return { ok: false, reason: "the key could not be delivered to the desk" };
 		return this.#answered();
