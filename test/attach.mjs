@@ -244,6 +244,32 @@ console.log("answer paths");
 		check("a checked row counts as an option", JSON.stringify(parsed?.options.map(o => o.label)) === JSON.stringify(["A", "B", "C"]) && JSON.stringify(parsed?.checked) === "[0]", JSON.stringify(parsed && { o: parsed.options.map(x => x.label), c: parsed.checked }));
 	}
 
+	// A multi-question dialog renders a tab bar ending in `Submit`, but each question
+	// is independently single- or multi-select. The tab-bar `Submit` must not promote a
+	// single-select question — the marker glyph decides. Captured live from omp 18.8.9.
+	{
+		const F = "\uf054";
+		const C = "\uf10c";
+		const tabbed = [
+			"╭─ Ask ─────────────────────────────────────",
+			"│  tests    runner    Submit                ",
+			"│ Do you want tests?                        ",
+			"├───────────────────────────────────────────",
+			`│ ${F} ${C} Yes                                   `,
+			`│   ${C} No                                    `,
+			`│   ${C} Other (type your own)                 `,
+			"│                                           ",
+			"│                                           ",
+			"│                                           ",
+			"├───────────────────────────────────────────",
+			"│ select · n note · ↑/↓ move · ←/→ question  ",
+			"╰───────────────────────────────────────────",
+		].join("\n");
+		const parsed = readDialogFromPane(tabbed);
+		check("tab-bar Submit does not promote a single-select question", parsed?.multi === false, String(parsed?.multi));
+		check("tabbed question text and options parse", parsed?.prompt === "Do you want tests?" && JSON.stringify(parsed.options.map(o => o.label)) === JSON.stringify(["Yes", "No"]), JSON.stringify(parsed && { p: parsed.prompt, o: parsed.options.map(x => x.label) }));
+	}
+
 	// A checked row is a SELECTED option, not a different kind of row. When the focused
 	// row is the checked one, seeding the marker vote from it made the checked glyph the
 	// block's marker and trimmed every unchecked sibling that shared the dialog's real
