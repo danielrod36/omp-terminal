@@ -74,10 +74,11 @@ export function linkSessions(left, right) {
 	const leftClass = ensureClass(left);
 	const rightClass = ensureClass(right);
 	if (leftClass === rightClass) return;
-	// Pick the survivor so the class that already OWNS the frames, and the id it emits under,
-	// is the one that keeps them. Callers link `(aliasId, canonicalId)`, so `right` is the
-	// canonical one and wins a tie — otherwise the first link of an alias pair would move the
-	// emit id onto the alias, and the ring would be keyed on a provisional id.
+	// Prefer the side that already owns frames (or the larger id set) as the survivor, so the
+	// established history keeps its ring object. This is a preference, not a correctness
+	// requirement: whichever side loses contributes its ids and its history to the survivor, and
+	// the trim protects the id that actually emitted rather than the one `emitId` happens to
+	// name, so a tie either way behaves identically. Frames and clients follow the survivor.
 	const leftWins = leftClass.messages.length > rightClass.messages.length ||
 		(leftClass.messages.length === rightClass.messages.length && leftClass.ids.size > rightClass.ids.size);
 	const [target, source] = leftWins ? [leftClass, rightClass] : [rightClass, leftClass];
@@ -128,11 +129,12 @@ export function linkSessions(left, right) {
 		for (const id of byUse) {
 			if (forgotten >= excess) break;
 			if (protectedIds.has(id)) continue;
-			// Never forget the id the class emits under. Relying on the caller to pass it as
-			// one of the two linked ids would let a future caller that links two aliases lose
-			// the canonical id, and the next emit under it would mint a fresh class — stranding
-			// the ring and its clients.
-			if (id === target.emitId) continue;
+			// Never forget the id that actually owns the ring: the one that has emitted, or —
+			// before any emit — the id the class was created under. Protecting `emitId` alone
+			// would be wrong when the survivor tie-break picked an id that never emitted, and
+			// protecting only the two linked ids would rely on callers passing the canonical
+			// as one of them.
+			if (id === (target.firstEmit ?? target.emitId)) continue;
 			// An id a client is subscribed under keeps its name: its stream and its polls both
 			// use it, and `getMessages` has no other way to find the class.
 			if ((idSubscribers.get(id) ?? 0) > 0) continue;
