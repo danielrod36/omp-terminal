@@ -62,19 +62,30 @@ export function createBridge(config) {
 
 	/** `omp --version`, resolved once and cached for /api/info. */
 	let ompVersion;
-	async function resolveOmpVersion() {
-		if (ompVersion !== undefined) return ompVersion;
-		try {
-			const { stdout } = await run(config.ompCommand, ["--version"], { timeout: 5000 });
-			ompVersion = stdout.trim().replace(/^omp\//, "") || null;
-		} catch (error) {
-			log.warn(`could not resolve omp version: ${error.message}`);
-			// Cache only a successful resolution: a probe that failed because omp
-			// was momentarily unavailable must not pin "unknown" for the process
-			// lifetime.
-			return null;
+	/** The in-flight probe, so concurrent callers share one child instead of one each. */
+	let ompVersionProbe;
+	function resolveOmpVersion() {
+		if (ompVersion !== undefined) return Promise.resolve(ompVersion);
+		// Cache the PROMISE, not the result: assigning only after the await let every
+		// concurrent /api/info spawn its own `omp --version` (measured: 30 requests, 30
+		// children), which any token holder could repeat to exhaust the process table.
+		if (!ompVersionProbe) {
+			ompVersionProbe = (async () => {
+				try {
+					const { stdout } = await run(config.ompCommand, ["--version"], { timeout: 5000 });
+					ompVersion = stdout.trim().replace(/^omp\//, "") || null;
+				} catch (error) {
+					// A probe that failed because omp was momentarily unavailable must not
+					// pin "unknown" for the process lifetime, so only a success is cached
+					// past this call.
+					log.warn(`could not resolve omp version: ${error.message}`);
+					ompVersionProbe = undefined;
+					return null;
+				}
+				return ompVersion;
+			})();
 		}
-		return ompVersion;
+		return ompVersionProbe;
 	}
 
 	function authorized(req) {

@@ -11,6 +11,11 @@ const log = createLogger("sse");
  */
 const MAX_MESSAGES_PER_SESSION = 500;
 const HEARTBEAT_MS = 15_000;
+/**
+ * Drop a client whose socket has buffered this much without draining. Well above a
+ * normal frame burst and below anything that threatens the process.
+ */
+const MAX_CLIENT_BUFFER_BYTES = 4 * 1024 * 1024;
 
 const sessions = new Map();
 /** Equivalence classes of session ids that must receive each other's frames. */
@@ -103,6 +108,23 @@ export function emit(sessionId, message) {
 		}
 		let dead = 0;
 		for (const client of session.clients) {
+			// A client that stops reading (asleep phone, wedged radio) never triggers
+			// 'close', so without this its unsent frames accumulate in userspace without
+			// bound — measured: 20k frames buffered 30 MB for one silent client. Dropping it
+			// loses nothing: the ring keeps the frames and the reconnect replays them from
+			// the cursor, which is the same path a dark-lens reconnect already takes.
+			// `writableLength` is undefined on the fakes tests pass in, which reads as idle.
+			if ((client.writableLength ?? 0) > MAX_CLIENT_BUFFER_BYTES) {
+				log.warn(`${targetId} dropping a client ${client.writableLength} bytes behind; it can replay on reconnect`);
+				try {
+					client.end?.();
+				} catch {
+					/* already gone */
+				}
+				session.clients.delete(client);
+				dead++;
+				continue;
+			}
 			try {
 				client.write(`id: ${id}\ndata: ${data}\n\n`);
 			} catch {
