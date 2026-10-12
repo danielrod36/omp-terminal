@@ -267,7 +267,9 @@ function isInsideSessionsRoot(config, file) {
 }
 
 export function findOmpSession(config, idOrPath) {
-	if (!idOrPath) return null;
+	// A JSON body can carry any type (`{"sessionId": 123}`); a non-string is simply an
+	// unknown id, not a 500 from `.includes` on a number.
+	if (typeof idOrPath !== "string" || !idOrPath) return null;
 	const root = config.sessionsRoot;
 	// A transcript is only ever a file INSIDE the sessions root. The id reaches this
 	// function from an HTTP path segment, so accepting any existing `.jsonl` let a token

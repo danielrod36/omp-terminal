@@ -188,14 +188,35 @@ export function createBridge(config) {
 					throw error;
 				}
 			}
-			// The scan may have resolved this id to a transcript another child already
-			// owns: two different client ids that prefix-match one transcript would
-			// otherwise each spawn a child, and the second `sessions.set` below would
-			// orphan the first past `bridge.close()`. Adopt the existing owner instead.
+			// The scan may have resolved this id to a transcript another child already owns:
+			// two client ids that prefix-match one transcript would otherwise each spawn a
+			// child, and the second `sessions.set` below would orphan the first past
+			// `bridge.close()`. Adopt the LIVE owner instead of spawning a duplicate.
+			//
+			// A dead owner must NOT be adopted: its child has exited, so every prompt would
+			// fail with "omp process is closed" until something unrelated evicted it. Falling
+			// through respawns, which is what the dead-session eviction exists to allow.
 			if (found) {
 				for (const existing of sessions.values()) {
 					const known = existing.sessionFile ?? existing.transcriptPath;
-					if (known && known === found) return existing;
+					if (!known || known !== found) continue;
+					// A dead owner is evicted rather than adopted. It would otherwise answer
+					// every prompt with "omp process is closed" until something unrelated
+					// evicted it — the session is keyed by the id the wearer prompted with, and
+					// this caller reaches it only through the transcript, so `dropIfDead` above
+					// (which resolves by id) cannot see it.
+					if (isDead(existing)) {
+						dropIfDead(existing);
+						continue;
+					}
+					// The caller subscribed under ITS id, so record the alias and link the rings
+					// here too — otherwise getLive never resolves it and its SSE client, which
+					// holds the id it prompted with, never receives the adopted session's frames.
+					if (sessionId && sessionId !== existing.id) {
+						sessionAliases.set(sessionId, existing.id);
+						linkSessions(sessionId, existing.id);
+					}
+					return existing;
 				}
 			}
 			const args = [];
@@ -230,8 +251,14 @@ export function createBridge(config) {
 			const incumbent = sessions.get(session.id);
 			if (incumbent && incumbent !== session) {
 				// Losing this race must not orphan a running child: keep the incumbent and
-				// drop the one we just started.
+				// drop the one we just started. The alias and ring link recorded above point
+				// at the child being killed, so re-point them at the incumbent, or the caller's
+				// id resolves to nothing and its frames land in a ring nobody serves.
 				session.kill();
+				if (clientId && clientId !== session.id) {
+					sessionAliases.set(clientId, incumbent.id);
+					linkSessions(clientId, incumbent.id);
+				}
 				return incumbent;
 			}
 			sessions.set(session.id, session);

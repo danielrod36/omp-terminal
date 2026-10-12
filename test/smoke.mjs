@@ -9,7 +9,7 @@
  *
  * Usage: node test/smoke.mjs [--no-omp]
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config.js";
@@ -266,7 +266,9 @@ console.log("tunnel provider parsing");
 console.log("auth and path confinement");
 {
 	// An empty token must never disable auth: `?token=` would satisfy it from any caller.
-	const empty = loadConfig({ flags: { token: "" }, store: {} });
+	// A scratch store path: generating a token must never write the host's real
+	// ~/.omp-terminal/config.json, which would rotate the pairing of a paired wearer.
+	const empty = loadConfig({ flags: { token: "" }, store: {}, storePath: join(workDir, "empty-token.json") });
 	check("an empty --token generates one instead of disabling auth", empty.token.length > 0 && empty.tokenSource === "generated", `${JSON.stringify(empty.token)}/${empty.tokenSource}`);
 
 	// A session id is opaque. A path that escapes the sessions root must not be read,
@@ -275,7 +277,12 @@ console.log("auth and path confinement");
 	const outside = join(workDir, "outside.jsonl");
 	writeFileSync(outside, `${JSON.stringify({ type: "title", title: "outside" })}\n`);
 	check("a transcript outside the sessions root is never resolved", findOmpSession(config, outside) === null);
-	check("nor via a traversal out of the root", findOmpSession(config, join(config.sessionsRoot, "..", "outside.jsonl")) === null);
+	// The escape target must EXIST, or the check passes for the wrong reason (nothing to
+	// find) rather than because the path was refused.
+	const escape = join(config.sessionsRoot, "..", "outside.jsonl");
+	writeFileSync(escape, `${JSON.stringify({ type: "title", title: "escaped" })}\n`);
+	check("nor via a traversal out of the root to a real file", existsSync(escape) && findOmpSession(config, escape) === null);
+	check("a non-string session id is an unknown id, not a throw", findOmpSession(config, 123) === null);
 	check("the store scan still returns sessions", Array.isArray(listOmpSessions(config, { limit: 1 })));
 	// A listing must not parse every transcript to return a few: the options object is the
 	// signature, and `limit` bounds the WORK, not just the result slice.
