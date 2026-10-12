@@ -361,6 +361,16 @@ console.log("sse ring lifecycle");
 		`armed=${armed} ended=${stalledRes.ended} tornDown=${stalledRes[marker] === undefined}`,
 	);
 
+	// A class is capped: every member costs a frame write on every emit, so a caller
+	// rotating prefix ids must not be able to make each frame O(invented ids).
+	events.emit("cap", { type: "user_prompt", text: "hi" });
+	for (let i = 0; i < 200; i++) events.linkSessions(`cap-alias-${i}`, "cap");
+	events.emit("cap", { type: "text_delta", text: "x" });
+	const fanned = events.getMessages("cap-alias-199", 0).length > 0;
+	check("an id class is capped rather than grown without bound", fanned === false, `alias199 fanned=${fanned}`);
+	check("a client's own id still receives the canonical session's frames",
+		events.getMessages("cap-alias-0", 0).length > 0, "first aliases should share the ring");
+
 	events.linkSessions("ring-alias2", "ring-canon2");
 	events.emit("ring-canon2", { type: "user_prompt", text: "x" });
 	events.addClient("ring-alias2", fake, false, null);
