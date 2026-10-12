@@ -177,12 +177,11 @@ export function dropSession(sessionId) {
 export function emit(sessionId, message) {
 	if (!sessionId) return 0;
 	const cls = ensureClass(sessionId);
-	// A class's ring belongs to the id it emits under. Writing under an alias would leave two
-	// populated rings to reconcile at the next merge, so it is refused loudly instead of
-	// silently duplicating the frame for every other id of the class.
+	// The class owns one ring regardless of which of its ids the caller emits under, so an
+	// alias write is redirected to the class's own id rather than refused: the frame fans out
+	// exactly once either way, and refusing would silence every subscriber.
 	if (cls.ids.size > 1 && sessionId !== cls.emitId) {
-		log.warn(`emit under alias ${sessionId} ignored; the class emits under ${cls.emitId}`);
-		return 0;
+		log.debug(`emit under alias ${sessionId} recorded on ${cls.emitId}`);
 	}
 	const data = JSON.stringify(message);
 	const id = cls.nextId++;

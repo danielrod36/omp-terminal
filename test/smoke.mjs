@@ -376,6 +376,21 @@ console.log("sse ring lifecycle");
 	// keeps its name: the stream and the poll route both reach the class through it.
 	check("the canonical id keeps its own ring", events.getMessages("cap", 0).length === 2,
 		`canonical=${events.getMessages("cap", 0).length}`);
+	// An emit under an alias of a multi-id class goes to the class's ONE ring: it must not be
+	// dropped (that would silence every subscriber) nor duplicated.
+	{
+		events.emit("aliascase", { type: "result", text: "first" });
+		events.linkSessions("aliascase-alias", "aliascase");
+		const frames = { write(chunk) { for (const m of String(chunk).matchAll(/^id: (\d+)/gm)) (this.ids ??= []).push(Number(m[1])); }, end() {}, on() {}, once() {}, setHeader() {}, flushHeaders() {}, writableEnded: false, destroyed: false };
+		events.addClient("aliascase-alias", frames, false, null);
+		const before = (frames.ids ?? []).length;
+		events.emit("aliascase-alias", { type: "result", text: "second" });
+		check("an emit under an alias reaches the subscribers", (frames.ids ?? []).length - before === 1,
+			`frames=${(frames.ids ?? []).length - before}`);
+		check("and lands in the one ring without duplicating",
+			events.historyFromRing("aliascase", 50).length === 2,
+			`history=${events.historyFromRing("aliascase", 50).length}`);
+	}
 	events.emit("capped", { type: "user_prompt", text: "q" });
 	events.linkSessions("capped-live", "capped");
 	const cappedRes = { write() {}, end() {}, on() {}, once() {}, setHeader() {}, flushHeaders() {}, writableEnded: false, destroyed: false };
