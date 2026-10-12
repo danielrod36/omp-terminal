@@ -466,6 +466,28 @@ console.log("sse ring lifecycle");
 	check("a client on the alias holds the whole class open", events.dropSession("ring-canon2") === false);
 }
 
+// A credential must never reach a log line in a shape the redactor misses. Today only
+// request URLs are logged, but a future line that dumps a header block would otherwise print
+// the token in full, and a leaked log line is permanent.
+{
+	const { redactToken } = await import("../src/log.js");
+	const leaks = [
+		["query", "GET /api/events?token=SECRET123&sessionId=x"],
+		["bearer", "Authorization: Bearer SECRET123"],
+		["json", '{"token":"SECRET123"}'],
+		["bare config", "token = SECRET123"],
+		["colon form", "  token: SECRET123"],
+	];
+	for (const [shape, text] of leaks) {
+		check(`a token is redacted from a ${shape} line`, !/SECRET/.test(redactToken(text)), redactToken(text));
+	}
+	const real = "GET /api/sessions?limit=5&token=abc123def&foo=bar";
+	check("redaction keeps the rest of the request line readable",
+		/\/api\/sessions/.test(redactToken(real)) && /limit=5/.test(redactToken(real)) && /foo=bar/.test(redactToken(real)) && !/abc123/.test(redactToken(real)),
+		redactToken(real));
+	check("redaction is idempotent", redactToken(redactToken(real)) === redactToken(real), redactToken(redactToken(real)));
+}
+
 // The permission announce must name the rows the desk card shows. omp's approval dialog calls
 // `select(<Allow tool: …>, ["Approve", "Deny"])` and tests the reply as `value === "Approve"`, so
 // announcing the stock `Yes`/`No` would ask the wearer about words they cannot see.

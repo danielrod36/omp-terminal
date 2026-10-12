@@ -11,9 +11,22 @@ export function configureLog({ level = "info", file = null } = {}) {
 	logFile = file;
 }
 
+/**
+ * Strip a pairing token from anything headed for a log line.
+ *
+ * Every current call site logs a request URL, where the token arrives as a query
+ * parameter. `Bearer` headers and bare JSON are covered too because a future line
+ * that dumps a header block or a config object would otherwise print the credential
+ * in full — the failure would be silent and permanent once it reached the log.
+ */
 export function redactToken(text) {
-	const s = String(text);
-	return s.replace(/([?&]token=)[^&]*/g, "$1<redacted>");
+	return String(text)
+		.replace(/([?&]token=)[^&\s"']*/gi, "$1<redacted>")
+		.replace(/(\bBearer\s+)[A-Za-z0-9._~+\/-]+=*/gi, "$1<redacted>")
+		.replace(/(["']?token["']?\s*[:=]\s*["'])[^"']*(["'])/gi, "$1<redacted>$2")
+		// `token = <value>` with no quotes at all, which is how config objects and
+		// hand-written diagnostics tend to print.
+		.replace(/(\btoken\s*[:=]\s*)(?!<redacted>)[^\s,;&"')]+/gi, "$1<redacted>");
 }
 
 function write(level, scope, message) {
