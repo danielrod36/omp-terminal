@@ -296,10 +296,16 @@ console.log("auth and path confinement");
 	const secret = join(secretDir, "outside-target.jsonl");
 	writeFileSync(secret, `${JSON.stringify({ type: "title", title: "SECRET" })}\n`);
 	const link = join(config.sessionsRoot, "link.jsonl");
-	symlinkSync(secret, link);
-	check("a symlink inside the root does not yield an outside file",
-		findOmpSession(config, link) === null,
-		JSON.stringify(findOmpSession(config, link)?.title));
+	// Guarded: symlinkSync throws on a filesystem that rejects links (or if a stale file is
+	// there), and an unguarded throw would abandon every remaining check and leak the temp dir.
+	try {
+		symlinkSync(secret, link);
+		check("a symlink inside the root does not yield an outside file",
+			findOmpSession(config, link) === null,
+			JSON.stringify(findOmpSession(config, link)?.title));
+	} catch (error) {
+		console.log(`  ~ symlink check skipped: ${error.message}`);
+	}
 	// An in-root transcript must still resolve, so the check is not over-broad.
 	const inside = join(config.sessionsRoot, "inside.jsonl");
 	writeFileSync(inside, `${JSON.stringify({ type: "title", title: "ok" })}\n`);

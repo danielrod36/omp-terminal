@@ -647,7 +647,7 @@ export function readDialogFromPane(pane) {
 		// diff) or a WRAPPED hint bar move the boundary below the real choices, which emptied the
 		// option list: the card then answered blind. Scanning forward from each candidate choice run
 		// keeps a mention harmless because the run itself is what locates the bar.
-		const isChoiceRow = content => /^([\uf054\u276f\u25b6\s]*)(Approve|Deny|Yes|No)\s*$/.exec(content) !== null;
+		const isChoiceRow = content => CHOICE_ROW.exec(content) !== null;
 		const looksLikeHint = content => /\bnavigate\b|\bselect\b|\bcancel\b|\btoggle\b|\bsubmit\b/.test(content);
 		// The last choice row anywhere in the body, and the first hint-like line below it.
 		let hintIndex = -1;
@@ -670,7 +670,7 @@ export function readDialogFromPane(pane) {
 			const rows = [];
 			for (let index = hintIndex - 1; index >= 0; index--) {
 				if (!body[index]) continue; // blank padding is not a boundary
-				const choice = body[index].match(/^([\uf054\u276f\u25b6\s]*)(Approve|Deny|Yes|No)\s*$/);
+				const choice = body[index].match(CHOICE_ROW);
 				if (!choice) break;
 				rows.unshift({ label: choice[2], focused: /[\uf054\u276f\u25b6]/.test(choice[1]) });
 			}
@@ -720,7 +720,7 @@ export function readDialogFromPane(pane) {
 			const tail = [];
 			for (let index = body.length - 1; index >= 0; index--) {
 				if (!body[index]) continue;
-				const choice = body[index].match(/^([\uf054\u276f\u25b6\s]*)(Approve|Deny|Yes|No)\s*$/);
+				const choice = body[index].match(CHOICE_ROW);
 				if (!choice) break;
 				tail.unshift({ label: choice[2], focused: /[\uf054\u276f\u25b6]/.test(choice[1]) });
 			}
@@ -773,7 +773,7 @@ function readAskFromPane(lines) {
 	// Multi-select signals, most reliable first:
 	//  1. the key-hint bar — ASCII, so it does not depend on the font. It says `toggle` for
 	//     multi-select and `select` for single, and docs/PROTOCOL.md §2 already calls it the
-	//     authoritative signal. Measured on all eleven live captures: the hint and the marker
+	//     authoritative signal. Measured on all twelve live captures: the hint and the marker
 	//     glyph agree every time (select+circle, toggle+square), so leading with the hint
 	//     changes nothing on real dialogs while surviving a font that renders a different glyph.
 	//  2. the option marker glyph — square (U+F096) multi, circle (U+F10C) single, verified by a
@@ -787,15 +787,11 @@ function readAskFromPane(lines) {
 	// The tab-bar `Submit` is the WEAKEST signal: a multi-QUESTION dialog renders that bar while
 	// each question is independently single- or multi-select, so it is evidence about the FORM,
 	// not the question. It is consulted only when neither the hint bar nor the marker glyph could
-	// decide (an unknown font with no hint line) — a case absent from all eleven live captures,
+	// decide (an unknown font with no hint line) — a case absent from all twelve live captures,
 	// which use only the known markers and carry a hint bar. Requiring a checked row to
 	// corroborate would not help: an alternate font's checked glyph is unnameable, so `checked`
 	// is always empty there and the card would be needlessly unreadable.
 	const headerSubmit = box.header.length >= 2 && /\bSubmit\s*$/.test(box.header[0]);
-	// The checked fallback requires MORE THAN ONE checked row: a single checked row is
-	// the wearer's cursor resting on a selected option in either mode, so it must not
-	// promote a single-select dialog to the multi path (where a dictated answer to an
-	// unchecked row would be dropped).
 	// The checked fallback requires MORE THAN ONE checked row: a single checked row is the
 	// wearer's cursor resting on a selected option in either mode, so it must not promote a
 	// single-select dialog to the multi path (where a dictated answer to an unchecked row is
@@ -1023,6 +1019,13 @@ const FOCUS = /[\uf054\u276f\u25b6]/;
 const MARKER_GLYPHS = new Set(["\uf10c", "\uf096", "\uf14a"]);
 /** The checked variant, which replaces the empty marker once a row is selected. */
 const CHECKED_GLYPH = "\uf14a";
+/**
+ * A permission menu row: an optional focus glyph, then nothing but a positive or negative label.
+ *
+ * One definition because three sites match it (the hint-bar scan, the walk-back, and the no-hint
+ * fallback) and they must agree on what a choice row is.
+ */
+const CHOICE_ROW = /^([\uf054\u276f\u25b6\s]*)(Approve|Deny|Yes|No)\s*$/;
 
 function isMarker(glyph) {
 	if (!glyph) return false;

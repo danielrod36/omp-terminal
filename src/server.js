@@ -511,19 +511,20 @@ export function createBridge(config) {
 			} catch {
 				return sendJson(res, 400, { error: "malformed session id in path" });
 			}
-			// An id is opaque: a percent-encoded slash survives URL pathname parsing, so
-			// `/api/sessions/a%2Fb.jsonl/history` decodes to a value with separators and would reach
-			// the filesystem branch in findOmpSession. Refuse it here, where the HTTP surface can see
-			// it, rather than relying on the containment check downstream.
-			if (id.includes("/") || id.includes("\\")) {
-				return sendJson(res, 400, { error: "session id must not contain a path separator" });
-			}
 			const limit = Math.min(Number(url.searchParams.get("limit")) || config.historyLimit, 20);
 			try {
 				// A bridge-owned session knows its exact transcript; a desk
 				// session is found by scanning the store.
 				const live = getLive(id);
 				const target = live?.sessionFile ?? live?.transcriptPath ?? id;
+				// Only a PATH may reach the filesystem branch. An id is opaque, and a percent-encoded
+				// slash survives URL pathname parsing, so `/api/sessions/a%2Fb.jsonl/history` decodes
+				// to a value with separators. A live session is exempt: its transcript comes from the
+				// bridge's own bookkeeping, and an attach id is `tmux:<name>` which may itself contain
+				// a slash.
+				if (!live && (target.includes("/") || target.includes("\\"))) {
+					return sendJson(res, 400, { error: "session id must not contain a path separator" });
+				}
 				const fromDisk = ompHistory(config, target, limit);
 				// omp flushes the transcript only when the session settles, so
 				// right after a turn the file may not exist yet. Fall back to the
