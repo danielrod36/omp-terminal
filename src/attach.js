@@ -632,7 +632,13 @@ function readAskFromPane(lines) {
 	// and does not depend on wording that a future build could rephrase.
 	const glyphMulti = box.markerGlyph === "\uf096" ? true : box.markerGlyph === "\uf10c" ? false : null;
 	const headerSubmit = box.header.length >= 2 && /\bSubmit\s*$/.test(box.header[0]);
-	const multi = glyphMulti ?? (/\btoggle\b/.test(box.help) || box.options.some(option => option.checked) || headerSubmit);
+	// The checked fallback requires MORE THAN ONE checked row: a single checked row is
+	// the wearer's cursor resting on a selected option in either mode, so it must not
+	// promote a single-select dialog to the multi path (where a dictated answer to an
+	// unchecked row would be dropped).
+	const multi =
+		glyphMulti ??
+		(/\btoggle\b/.test(box.help) || box.options.filter(option => option.checked).length > 1 || headerSubmit);
 	return {
 		kind: "question",
 		toolName: "ask",
@@ -715,19 +721,40 @@ function readAskBoxes(lines) {
 		//
 		// The focused row is always kept: it is an option by definition, and dropping it
 		// would leave focusRow at -1 and make the live dialog unanswerable.
-		const glyphVotes = new Map();
-		for (const candidate of candidates) glyphVotes.set(candidate.marker, (glyphVotes.get(candidate.marker) ?? 0) + 1);
-		// Seed the winner with the focused row's glyph: a tie must not hand the dialog
-		// to a stray row that merely came first (`Map` iteration is insertion-ordered).
+		// Count the empty markers and the checked ones separately. A checked row is a
+		// SELECTED option, not a different kind of row, and it is the focused row
+		// whenever the wearer's cursor sits on it — so seeding the tie with the focused
+		// row's glyph would make a checked box the block's marker and trim every
+		// unchecked sibling that shares the dialog's real (empty) glyph.
+		const emptyVotes = new Map();
+		let checkedCount = 0;
+		for (const candidate of candidates) {
+			if (candidate.marker === CHECKED_GLYPH) {
+				checkedCount++;
+				continue;
+			}
+			emptyVotes.set(candidate.marker, (emptyVotes.get(candidate.marker) ?? 0) + 1);
+		}
+		// Seed with the focused row's EMPTY glyph: on a tie the dialog must not be handed
+		// to a stray row that merely came first (`Map` iteration is insertion-ordered),
+		// and the focused row's checked marker is not a candidate for the empty glyph.
+		let modalGlyph = null;
+		let modalGlyphCount = 0;
 		const focusedRow = candidates.find(candidate => candidate.focus);
-		let modalGlyph = focusedRow ? focusedRow.marker : null;
-		let modalGlyphCount = modalGlyph === null ? 0 : glyphVotes.get(modalGlyph) ?? 0;
-		for (const [glyph, count] of glyphVotes) {
+		if (focusedRow && focusedRow.marker !== CHECKED_GLYPH) {
+			modalGlyph = focusedRow.marker;
+			modalGlyphCount = emptyVotes.get(modalGlyph) ?? 0;
+		}
+		for (const [glyph, count] of emptyVotes) {
 			if (count > modalGlyphCount) {
 				modalGlyph = glyph;
 				modalGlyphCount = count;
 			}
 		}
+		// No empty marker anywhere (every row is checked): fall back to the dialog's
+		// shape from the header rather than leaving the block without a marker.
+		if (modalGlyph === null && candidates.length > 0) modalGlyph = candidates[0].marker === CHECKED_GLYPH ? null : candidates[0].marker;
+		void checkedCount;
 		// A checked row renders U+F14A where an unchecked one renders U+F096/U+F10C, so
 		// the checked glyph is a variant of the same marker rather than a different one.
 		const sameMarker = (glyph, reference) =>

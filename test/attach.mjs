@@ -244,6 +244,24 @@ console.log("answer paths");
 		check("a checked row counts as an option", JSON.stringify(parsed?.options.map(o => o.label)) === JSON.stringify(["A", "B", "C"]) && JSON.stringify(parsed?.checked) === "[0]", JSON.stringify(parsed && { o: parsed.options.map(x => x.label), c: parsed.checked }));
 	}
 
+	// A checked row is a SELECTED option, not a different kind of row. When the focused
+	// row is the checked one, seeding the marker vote from it made the checked glyph the
+	// block's marker and trimmed every unchecked sibling that shared the dialog's real
+	// (empty) glyph — the row the wearer would dictate next simply vanished.
+	{
+		const mk = rows => ["╭─ Ask ─╮", "│  q  Submit │", "│ Which? │", "├────┤", ...rows, "│  │", "├────┤", "│ toggle · submit · ↑/↓ │", "╰────╯"].join("\n");
+		const checkedFocus = mk([`│ ${FOCUS} ${CHECK} A │`, `│   ${SQUARE} B │`]);
+		const parsed = readDialogFromPane(checkedFocus);
+		check("a checked focused row does not trim its empty sibling", JSON.stringify(parsed?.options.map(o => o.label)) === JSON.stringify(["A", "B"]) && JSON.stringify(parsed?.checked) === "[0]", JSON.stringify(parsed && { o: parsed.options.map(x => x.label), c: parsed.checked }));
+		const twoChecked = mk([`│ ${FOCUS} ${CHECK} A │`, `│   ${CHECK} B │`, `│   ${SQUARE} C │`]);
+		check("two checked rows plus an empty one keeps all three", JSON.stringify(readDialogFromPane(twoChecked)?.options.map(o => o.label)) === JSON.stringify(["A", "B", "C"]), JSON.stringify(readDialogFromPane(twoChecked)?.options.map(o => o.label)));
+		const allChecked = mk([`│ ${FOCUS} ${CHECK} A │`, `│   ${CHECK} B │`]);
+		check("a fully checked dialog keeps every row", JSON.stringify(readDialogFromPane(allChecked)?.options.map(o => o.label)) === JSON.stringify(["A", "B"]), JSON.stringify(readDialogFromPane(allChecked)?.options.map(o => o.label)));
+		const singleChecked = mk([`│ ${FOCUS} ${CHECK} A │`, `│   ${MARK} B │`]);
+		const single = readDialogFromPane(singleChecked.replace("toggle · submit", "select"));
+		check("one checked row does not promote a single-select dialog", single?.multi === false, String(single?.multi));
+	}
+
 	// A render whose focused row sits one column off (leading padding is
 	// terminal-width dependent) must still yield a usable dialog: the focused row is
 	// never trimmed, or focusRow stays -1 and the dialog becomes unanswerable.
