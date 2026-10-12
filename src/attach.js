@@ -764,10 +764,13 @@ function readAskBoxes(lines) {
 			}
 		}
 		if (tied) modalGlyph = null;
-		// No sibling evidence (every sibling checked, or a tie): fall back to the focused
-		// row's own glyph so the dialog stays answerable at all. A focused CHECKED glyph is
-		// not the block's empty marker, so it does not qualify.
-		if (modalGlyph === null && focusedRow && focusedRow.marker !== CHECKED_GLYPH && (!knownFont || focusedRow.known)) {
+		// No sibling evidence whatsoever (every sibling checked, or no sibling at all): fall
+		// back to the focused row's own glyph so the dialog stays answerable at all. A focused
+		// CHECKED glyph is not the block's empty marker, so it does not qualify.
+		// A TIE deliberately does not adopt: the candidates then disagree, and an unnameable
+		// glyph that is really a checked sibling's variant is indistinguishable from a stray,
+		// so adopting either would drop a real option (see the keep-all rule below).
+		if (modalGlyph === null && siblingVotes.size === 0 && focusedRow !== undefined && focusedRow.marker !== CHECKED_GLYPH && (!knownFont || focusedRow.known)) {
 			modalGlyph = focusedRow.marker;
 		}
 		// `modalGlyph` stays null when a known font checks every row (no empty marker
@@ -777,6 +780,13 @@ function readAskBoxes(lines) {
 		// the checked glyph is a variant of the same marker rather than a different one.
 		const sameMarker = (glyph, reference) =>
 			glyph === reference || (glyph === CHECKED_GLYPH && reference !== CHECKED_GLYPH);
+		// A row belongs to the block's marker family when it matches the marker. With no
+		// marker decided — a tie in an alternate icon set, or a known font with every row
+		// checked — nothing can be compared, so EVERY row is kept. The trade is deliberate:
+		// an unnameable glyph that is really a checked sibling cannot be told from a stray,
+		// and keeping a phantom row costs a mis-dictated index while dropping a real one
+		// loses the option outright, which is the worse failure.
+		const family = (glyph) => modalGlyph === null || sameMarker(glyph, modalGlyph);
 		// Only a known font lets the mode be read from the glyph; an alternate icon set's
 		// marker is unknown to us, so the mode comes from the header or hint fallbacks.
 		box.markerGlyph = knownFont ? modalGlyph : null;
@@ -787,7 +797,7 @@ function readAskBoxes(lines) {
 			// in a known font, or a differing glyph anywhere, marks a stray whose presence
 			// would inflate the option list and shift every dictated index.
 			if (!row.focus && knownFont && !row.known) continue;
-			if (!row.focus && modalGlyph !== null && !sameMarker(row.marker, modalGlyph)) continue;
+			if (!row.focus && !family(row.marker)) continue;
 			// The `Other (type your own)` row is the free-text affordance, not one of
 			// the offered options.
 			if (/^Other \(type your own\)$/.test(row.label)) continue;

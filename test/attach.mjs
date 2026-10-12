@@ -254,19 +254,27 @@ console.log("answer paths");
 		const altFont = box([`│ ${FOCUS} ${XC} A │`, `│   ${X} B │`]);
 		const alt = readDialogFromPane(altFont);
 		check("alternate font with a checked focused row keeps its siblings", JSON.stringify(alt?.options.map(o => o.label)) === JSON.stringify(["A", "B"]), JSON.stringify(alt?.options.map(o => o.label)));
+		// A checked SIBLING in the same font must survive too: its variant glyph is
+		// unnameable, and dropping it would shift every later index.
+		const sib = box([`│ ${FOCUS} ${X} A │`, `│   ${X} B │`, `│   ${XC} C │`]);
+		const got = readDialogFromPane(sib);
+		check("alternate font keeps a checked sibling", JSON.stringify(got?.options.map(o => o.label)) === JSON.stringify(["A", "B", "C"]), JSON.stringify(got?.options.map(o => o.label)));
 	}
 
-	// An alternate icon set must still drop a stray: with the focused row EMPTY, the
-	// siblings carry the block's own marker and a third row carrying a different glyph
-	// is a stray. Keeping it would inflate focusRow and make Enter land past the
-	// dictated option.
+	// An alternate icon set with a TIED glyph vote keeps every row. This is a deliberate
+	// policy, not an oversight: {focused X, sibling X, sibling Z} with Z unnameable is
+	// also the shape of a checked sibling whose variant glyph we cannot name, and no
+	// pane-only rule separates the two. Keeping a phantom costs a mis-dictated index;
+	// dropping a real option loses it outright, which is the worse failure. All twelve
+	// real captures use only the known glyphs, and 1,280 realistic dialogs (single- and
+	// multi-select, every focus position, every checked combination, 2-6 options)
+	// resolve without ever reaching this path.
 	{
 		const X = "\uf2c7";
 		const Y = "\uf2c8";
 		const box = rows => ["╭─ Ask ─╮", "│ Which? │", "├────┤", ...rows, "│  │", "├────┤", "│ select · ↑/↓ │", "╰────╯"].join("\n");
-		const strayed = box([`│ ${FOCUS} ${X} A │`, `│   ${X} B │`, `│ ${Y} note │`]);
-		const kept = readDialogFromPane(strayed);
-		check("an alternate font still drops a stray", JSON.stringify(kept?.options.map(o => o.label)) === JSON.stringify(["A", "B"]), JSON.stringify(kept?.options.map(o => o.label)));
+		const tied = readDialogFromPane(box([`│ ${FOCUS} ${X} A │`, `│   ${X} B │`, `│ ${Y} note │`]));
+		check("a tied alternate-font glyph vote keeps every row", JSON.stringify(tied?.options.map(o => o.label)) === JSON.stringify(["A", "B", "note"]), JSON.stringify(tied?.options.map(o => o.label)));
 	}
 
 	// The same stray in a KNOWN font: every row checked leaves no marker to compare
