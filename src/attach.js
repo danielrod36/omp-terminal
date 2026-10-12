@@ -1051,8 +1051,9 @@ const CHECKED_GLYPH = "\uf14a";
 /**
  * A permission menu row: an optional focus glyph, then nothing but a positive or negative label.
  *
- * One definition because two sites match it (the run scan that locates the menu, and the row
- * build that reads it) and they must agree on what a choice row is.
+ * One definition because five sites match it — the run scan that locates the menu (its first
+ * line, its continuation, and the labels at either end) and the row build that reads it — and they
+ * must agree on what a choice row is.
  */
 const CHOICE_ROW = /^([\uf054\u276f\u25b6\s]*)(Approve|Deny|Yes|No)\s*$/;
 
