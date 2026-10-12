@@ -41,8 +41,8 @@ http://<host>:<port>?token=<token>&defaultProvider=<provider>
 | `GET /api/info` | `{ account, model, version, provider }` |
 | `GET /api/sessions/:id/history?limit=` | `{ history: [{ role, text }] }` |
 | `POST /api/prompt` | `{ text, sessionId?, cwd? }` → `202 { ok, sessionId, provider }` |
-| `POST /api/permission-response` | `{ sessionId, decision: allow \| allowAlways \| deny }` |
-| `POST /api/question-response` | `{ sessionId, answer }` |
+| `POST /api/permission-response` | `{ sessionId, decision: allow \| allowAlways \| deny }` — `200` on submit, `409` naming the reason in `error` when the card was not understood |
+| `POST /api/question-response` | `{ sessionId, answer }` — `200` on submit, `409` when the card could not be answered |
 | `POST /api/interrupt` | `{ sessionId }` |
 | `GET /api/status?sessionId=` | `{ state: busy \| idle \| awaiting, sessionId, provider }` |
 | `GET /api/messages?sessionId=&after=` | ring poll fallback |
@@ -223,6 +223,12 @@ carry `{text, key}` instead, where `key` stays the stock `allow`/`allowAlways`/`
 decision and `text` must be the label the wearer answered with, so the announce
 mirrors the card's own rows rather than a fixed `Yes`/`No`. Verified end to end:
 answering `allow` runs the gated tool (`test/live-permission.mjs`).
+
+A refusal is a `409` naming the reason in the `error` field, never a bare `400`: "no permission card is on
+screen" and "the card is there but was not understood" call for different behaviour, and the
+wearer is told to wait in only the first case. A `404` means the id names nothing at all — the
+dialog routes adopt a listed desk pane on demand, so an id straight out of `/api/sessions`
+resolves.
 
 Do not confuse this with the option IDs `allow_once`/`allow_always`/`reject_once`/
 `reject_always`. Those belong to a different path — a host `requestPermission` hook
