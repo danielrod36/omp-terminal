@@ -220,11 +220,14 @@ console.log("dialog properties");
 	// The marker glyph encodes the mode (measured by controlled A/B): a multi-select
 	// dialog renders U+F096 (square), a single-select one U+F10C (circle), and a
 	// selected row U+F14A.
-	const build = ({ labels, focus = 0, checked = [], multi = false, headerIcon = false, question = "Which?", hint = null }) => {
+	const build = ({ labels, focus = 0, checked = [], multi = false, headerIcon = false, question = "Which?", hint = "" }) => {
 		// The hint bar follows the mode as it does live (measured: `toggle` on every multi
-		// capture, `select` on every single one). `null` means "no hint bar", which lets the
-		// marker glyph decide — the case the no-hint fixtures exist to cover.
-		if (hint === null) hint = multi ? "toggle" : "select";
+		// capture, `select` on every single one), so it is derived unless the caller passes one.
+		// An explicit `null` means "this card has NO bar", which is a real render — a mid-repaint
+		// pane shows the rows before the bar paints — and the default used to overwrite it, so no
+		// fixture could express that case at all.
+		const noHint = hint === null;
+		if (!noHint && hint === "") hint = multi ? "toggle" : "select";
 		const shape = multi ? SQUARE : MARK;
 		const lines = ["╭─ Ask ─╮"];
 		if (multi) lines.push(`│ ${headerIcon ? ICON + " " : ""}colour  Submit │`);
@@ -235,7 +238,7 @@ console.log("dialog properties");
 			lines.push(`│ ${cursor}${marker} ${label} │`);
 		});
 		lines.push("│      │", "├──────┤");
-		if (hint !== null) lines.push(`│ ${hint} · ↑/↓ │`);
+		if (!noHint) lines.push(`│ ${hint} · ↑/↓ │`);
 		lines.push("╰──────╯");
 		return lines.join("\n");
 	};
@@ -249,7 +252,12 @@ console.log("dialog properties");
 		["already-checked row", { labels: ["A", "B"], checked: [1], multi: true }, true],
 		["labels that begin with a glyph", { labels: ["● Low", "★ Star", "□ Box"] }, false],
 		["reworded hint bar", { labels: ["A", "B"], hint: "mark · confirm" }, false],
-		["no hint bar", { labels: ["A", "B"], hint: "" }, false],
+		["no hint bar", { labels: ["A", "B"], hint: null }, false],
+		// A bar-less MULTI card: before the `hint` sentinel was fixed this render could not be
+		// expressed at all. It does not isolate the glyph branch — the builder writes the multi
+		// marker AND a `Submit` header, so `headerSubmit` would reach the same answer if the glyph
+		// signal were removed — it pins that the no-bar multi path parses at all.
+		["no hint bar, multi form", { labels: ["A", "B"], multi: true, hint: null }, true],
 		["question mentioning Submit", { labels: ["A", "B"], question: "Should I submit?" }, false],
 	]) {
 		const parsed = readDialogFromPane(build(opts));
