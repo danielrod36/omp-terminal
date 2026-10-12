@@ -362,14 +362,19 @@ console.log("sse ring lifecycle");
 	);
 
 	// A class is capped: every member costs a frame write on every emit, so a caller
-	// rotating prefix ids must not be able to make each frame O(invented ids).
+	// rotating prefix ids must not be able to make each frame O(invented ids). But the cap
+	// EVICTS old members — it must never refuse the arriving id, or hostile ids would fill
+	// the class and mute every later, genuinely subscribed, client for as long as the
+	// session lives.
 	events.emit("cap", { type: "user_prompt", text: "hi" });
 	for (let i = 0; i < 200; i++) events.linkSessions(`cap-alias-${i}`, "cap");
+	// The id that just linked must still be reachable, even after the class overflowed.
 	events.emit("cap", { type: "text_delta", text: "x" });
-	const fanned = events.getMessages("cap-alias-199", 0).length > 0;
-	check("an id class is capped rather than grown without bound", fanned === false, `alias199 fanned=${fanned}`);
-	check("a client's own id still receives the canonical session's frames",
-		events.getMessages("cap-alias-0", 0).length > 0, "first aliases should share the ring");
+	check("the arriving id is never evicted by the class cap",
+		events.getMessages("cap-alias-199", 0).length > 0,
+		`alias199 fanned=${events.getMessages("cap-alias-199", 0).length > 0}`);
+	check("an early alias is the one evicted", events.getMessages("cap-alias-0", 0).length === 0,
+		`alias0 fanned=${events.getMessages("cap-alias-0", 0).length > 0}`);
 
 	events.linkSessions("ring-alias2", "ring-canon2");
 	events.emit("ring-canon2", { type: "user_prompt", text: "x" });

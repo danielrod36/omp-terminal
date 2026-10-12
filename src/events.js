@@ -62,21 +62,44 @@ export function linkSessions(left, right) {
 	const classLeft = idClass(left);
 	const classRight = idClass(right);
 	if (classLeft === classRight) return;
-	// A class exists only to bridge the id a client already holds to the canonical one, so
-	// its useful size is bounded by the number of distinct ids a client could be holding.
-	// An unbounded class is not merely memory: `emit` writes one frame per member, so a
-	// caller rotating prefix ids made every frame cost O(ids) — measured 229x for 1000
-	// aliases. Refusing to grow past the cap is safe because the caller's next prompt
-	// re-resolves the id through the store and re-links it.
-	if (classLeft.size + classRight.size > MAX_IDS_PER_CLASS) {
-		log.warn(`refusing to link ${right} into a class of ${classLeft.size} ids (cap ${MAX_IDS_PER_CLASS})`);
-		return;
+	// A class exists only to bridge the ids a client already holds to the session's
+	// canonical one. An unbounded class is not merely memory: `emit` writes one frame per
+	// member, so a caller rotating prefix ids made every frame cost O(ids) — measured 229x
+	// for 1000 aliases.
+	//
+	// The cap EVICTS the stalest members rather than refusing the new id. Refusing would be a
+	// lockout, not a limit: once hostile ids fill a class, every later — genuinely
+	// subscribed — id would be muted for as long as the session lives, because nothing
+	// shrinks the class. Both sides merge first, so the survivor set is the merged one and a
+	// freshly-arriving id can never be dropped in favour of ids that arrived before it.
+	// Merge the SMALLER class into the larger one, so the established class (usually the
+	// canonical session's ring) keeps its insertion order and the arriving id is appended
+	// last. Merging the other way would make the arrival the oldest member and the trim
+	// below would evict the client that just subscribed.
+	const [target, source] = classLeft.size >= classRight.size ? [classLeft, classRight] : [classRight, classLeft];
+	for (const id of source) {
+		if (target.has(id)) continue;
+		target.add(id);
+		idLinks.set(id, target);
 	}
-	for (const id of classRight) {
-		classLeft.add(id);
-		idLinks.set(id, classLeft);
+	// Trim to the cap, evicting the OLDEST members first — except never the two ids just
+	// linked, and never an id with an attached client. Ordering by insertion is what makes
+	// "oldest" meaningful, and excluding the linked pair is what keeps the arrival reachable
+	// no matter which class the merge happened to grow.
+	const protectedIds = new Set([left, right]);
+	const members = [...target];
+	const excess = Math.max(0, members.length - MAX_IDS_PER_CLASS);
+	let evicted = 0;
+	for (const id of members) {
+		if (evicted >= excess) break;
+		if (protectedIds.has(id)) continue;
+		if (sessions.get(id)?.clients.size > 0) continue; // a live SSE client keeps its id
+		target.delete(id);
+		idLinks.delete(id);
+		evicted++;
+		log.warn(`evicted stale session id ${id} from a class at the ${MAX_IDS_PER_CLASS}-id cap`);
 	}
-	log.debug(`linked session ids ${[...classLeft].join(" = ")}`);
+	log.debug(`linked session ids ${[...target].join(" = ")}`);
 }
 
 /**
