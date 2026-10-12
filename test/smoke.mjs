@@ -372,11 +372,21 @@ console.log("sse ring lifecycle");
 		events.historyFromRing("cap-alias-399", 50).length === 1 &&
 		events.getMessages("cap", 0).length === 2,
 		`history=${events.historyFromRing("cap-alias-399", 50).length} ring=${events.getMessages("cap", 0).length}`);
-	check("an id past the lookup cap still shares the ring",
-		events.getMessages("cap-alias-399", 0).length > 0,
-		`alias399 messages=${events.getMessages("cap-alias-399", 0).length}`);
+	// The cap forgets the LEAST-RECENTLY-USED names, and an id a client is subscribed under
+	// keeps its name: the stream and the poll route both reach the class through it.
 	check("the canonical id keeps its own ring", events.getMessages("cap", 0).length === 2,
 		`canonical=${events.getMessages("cap", 0).length}`);
+	events.emit("capped", { type: "user_prompt", text: "q" });
+	events.linkSessions("capped-live", "capped");
+	const cappedRes = { write() {}, end() {}, on() {}, once() {}, setHeader() {}, flushHeaders() {}, writableEnded: false, destroyed: false };
+	events.addClient("capped-live", cappedRes, false, null);
+	for (let i = 0; i < 400; i++) events.linkSessions(`capped-junk-${i}`, "capped");
+	check("a subscribed id keeps its name past the lookup cap",
+		events.getMessages("capped-live", 0).length > 0,
+		`live id messages=${events.getMessages("capped-live", 0).length}`);
+	check("the cap forgets an idle id instead",
+		events.getMessages("capped-junk-0", 0).length === 0,
+		`junk-0 messages=${events.getMessages("capped-junk-0", 0).length}`);
 
 	events.linkSessions("ring-alias2", "ring-canon2");
 	events.emit("ring-canon2", { type: "user_prompt", text: "x" });

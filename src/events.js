@@ -38,8 +38,22 @@ const DISPOSE = Symbol.for("omp-terminal.dispose");
 /** id -> its class. Every id of a class points at the same object. */
 const sessions = new Map();
 
+/**
+ * When each id was last looked up or emitted under. A class owns one ring, so forgetting an
+ * id costs only its name; this list decides which names are worth keeping, newest first.
+ */
+const idUse = new Map();
+/** How many attached SSE clients subscribed under each id. */
+const idSubscribers = new Map();
+
+function touchId(id) {
+	idUse.delete(id);
+	idUse.set(id, Date.now());
+}
+
 /** The class an id belongs to, creating one when it is new. */
 function ensureClass(id) {
+	touchId(id);
 	let cls = sessions.get(id);
 	if (!cls) {
 		cls = { ids: new Set([id]), messages: [], clients: new Set(), nextId: 1, lastDeliveredId: 0 };
@@ -64,29 +78,56 @@ export function linkSessions(left, right) {
 	// longest keep their ring. Merging the other way is harmless for the ring, which is
 	// shared either way, but this keeps the survivor stable across repeated links.
 	const [target, source] = leftClass.ids.size >= rightClass.ids.size ? [leftClass, rightClass] : [rightClass, leftClass];
-	if (target.messages.length === 0 && source.messages.length > 0) {
-		target.messages = source.messages;
-		target.nextId = source.nextId;
-		target.lastDeliveredId = source.lastDeliveredId;
+	// Both sides can already hold frames (an emit before the link). Keep BOTH histories in
+	// time order instead of dropping one: a client still holding a `Last-Event-ID` from
+	// either ring must find it, and ids stay monotonic across the merge so no replay skips a
+	// frame. Renumbering the source entries is what makes the two id spaces comparable — they
+	// were minted independently, so their ids overlap.
+	if (source.messages.length > 0) {
+		const base = target.nextId;
+		const merged = source.messages.map(entry => ({ id: entry.id + base - 1, message: entry.message }));
+		target.messages = [...target.messages, ...merged]
+			.sort((left, right) => left.id - right.id)
+			.slice(-MAX_MESSAGES_PER_SESSION);
+		target.nextId = base + source.nextId - 1;
+		target.lastDeliveredId = Math.max(target.lastDeliveredId, target.nextId - 1);
 	}
 	for (const id of source.ids) {
 		target.ids.add(id);
 		sessions.set(id, target);
 	}
+	// Move the clients too. Leaving them on `source` strands them: that object is no longer
+	// reachable from any id, so `emit` never fans to it, the backpressure sweep cannot see
+	// it, and `totalClients` undercounts — a client subscribed under a merged-away id would
+	// keep its heartbeat but stop receiving anything for good.
+	for (const client of source.clients) target.clients.add(client);
+	source.clients.clear();
 	// Bound the lookup by forgetting the stalest ids. This drops only the name: the ring is
 	// the class's, so a forgotten id loses no history, and `linkSessions` or a prompt
 	// re-establishes it. The ids linked just now are never the ones forgotten, so the caller
 	// that is acting right now always stays reachable.
 	const protectedIds = new Set([left, right]);
 	const excess = Math.max(0, target.ids.size - MAX_IDS_PER_CLASS);
-	let forgotten = 0;
-	for (const id of target.ids) {
-		if (forgotten >= excess) break;
-		if (protectedIds.has(id)) continue;
-		target.ids.delete(id);
-		sessions.delete(id);
-		forgotten++;
-		log.warn(`forgot stale session id ${id} from a class at the ${MAX_IDS_PER_CLASS}-id cap`);
+	if (excess > 0) {
+		// Least-recently-used first: an id that is being polled or subscribed was touched
+		// moments ago, so it outranks ids invented in a burst. `idUse` is insertion-ordered,
+		// and `touchId` re-inserts on every use.
+		const byUse = [...idUse.keys()];
+		let forgotten = 0;
+		for (const id of byUse) {
+			if (forgotten >= excess) break;
+			if (protectedIds.has(id)) continue;
+			// An id a client is subscribed under keeps its name: its stream and its polls both
+			// use it, and `getMessages` has no other way to find the class.
+			if ((idSubscribers.get(id) ?? 0) > 0) continue;
+			if (!target.ids.has(id)) continue;
+			target.ids.delete(id);
+			sessions.delete(id);
+			idUse.delete(id);
+			idSubscribers.delete(id);
+			forgotten++;
+			log.warn(`forgot idle session id ${id} from a class at the ${MAX_IDS_PER_CLASS}-id cap`);
+		}
 	}
 	log.debug(`linked session ids ${[...target.ids].join(" = ")}`);
 }
@@ -104,7 +145,11 @@ export function dropSession(sessionId) {
 	const cls = sessions.get(sessionId);
 	if (!cls) return false;
 	if (cls.clients.size > 0) return false;
-	for (const id of cls.ids) sessions.delete(id);
+	for (const id of cls.ids) {
+		sessions.delete(id);
+		idUse.delete(id);
+		idSubscribers.delete(id);
+	}
 	log.debug(`dropped ring for ${[...cls.ids].join(" = ")}`);
 	return true;
 }
@@ -245,6 +290,9 @@ export function addClient(sessionId, res, needReplay, lastEventId) {
 		disposed = true;
 		clearInterval(heartbeat);
 		cls.clients.delete(res);
+		const remaining = (idSubscribers.get(sessionId) ?? 1) - 1;
+		if (remaining > 0) idSubscribers.set(sessionId, remaining);
+		else idSubscribers.delete(sessionId);
 		// Clear the marker so a caller can tell a torn-down client from a live one: a
 		// heartbeat still ticking after `end()` is the crash this guards against.
 		delete res[DISPOSE];
@@ -260,6 +308,7 @@ export function addClient(sessionId, res, needReplay, lastEventId) {
 	}, HEARTBEAT_MS);
 
 	cls.clients.add(res);
+	idSubscribers.set(sessionId, (idSubscribers.get(sessionId) ?? 0) + 1);
 	log.info(
 		`client connected ${sessionId} (replayFrom=${replayFrom} replayed=${replayed}/${cls.messages.length} live=${cls.clients.size} total=${totalClients()})`,
 	);
