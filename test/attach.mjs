@@ -244,6 +244,29 @@ console.log("answer paths");
 		check("a checked row counts as an option", JSON.stringify(parsed?.options.map(o => o.label)) === JSON.stringify(["A", "B", "C"]) && JSON.stringify(parsed?.checked) === "[0]", JSON.stringify(parsed && { o: parsed.options.map(x => x.label), c: parsed.checked }));
 	}
 
+	// An alternate icon set (no known marker anywhere) must stay answerable even when
+	// its checked glyph is the focused row's: nothing is known to compare against, so
+	// its rows cannot be told from a stray and all of them are kept.
+	{
+		const X = "\uf2c7";       // alternate empty marker
+		const XC = "\uf2c9";      // alternate checked marker
+		const box = rows => ["╭─ Ask ─╮", "│ Which? │", "├────┤", ...rows, "│  │", "├────┤", "│ select · ↑/↓ │", "╰────╯"].join("\n");
+		const altFont = box([`│ ${FOCUS} ${XC} A │`, `│   ${X} B │`]);
+		const alt = readDialogFromPane(altFont);
+		check("alternate font with a checked focused row keeps its siblings", JSON.stringify(alt?.options.map(o => o.label)) === JSON.stringify(["A", "B"]), JSON.stringify(alt?.options.map(o => o.label)));
+	}
+
+	// The same stray in a KNOWN font: every row checked leaves no marker to compare
+	// against, but the font is known, so an exotic row is still a stray and must not
+	// inflate the option list — focusRow and the Down-press arithmetic depend on it.
+	{
+		const X = "\uf2c7";
+		const box = rows => ["╭─ Ask ─╮", "│ Which? │", "├────┤", ...rows, "│  │", "├────┤", "│ select · ↑/↓ │", "╰────╯"].join("\n");
+		const strayed = box([`│ ${FOCUS} ${CHECK} A │`, `│   ${CHECK} B │`, `│ ${X} note │`]);
+		const kept = readDialogFromPane(strayed);
+		check("an all-checked known font drops an exotic stray", JSON.stringify(kept?.options.map(o => o.label)) === JSON.stringify(["A", "B"]), JSON.stringify(kept?.options.map(o => o.label)));
+	}
+
 	// A multi-question dialog renders a tab bar ending in `Submit`, but each question
 	// is independently single- or multi-select. The tab-bar `Submit` must not promote a
 	// single-select question — the marker glyph decides. Captured live from omp 18.8.9.

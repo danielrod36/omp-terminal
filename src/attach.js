@@ -755,25 +755,27 @@ function readAskBoxes(lines) {
 				modalGlyphCount = count;
 			}
 		}
-		// No known marker anywhere: an alternate font. Use the focused row's glyph so the
-		// dialog stays answerable, and keep its siblings (compared by glyph below).
-		if (modalGlyph === null && focusedRow && focusedRow.marker !== CHECKED_GLYPH) {
-			modalGlyph = focusedRow.marker;
-		}
-		// `modalGlyph` stays null when every row is checked (no empty marker exists). That
-		// is deliberate: the mode then comes from the header or hint fallbacks, and the
-		// selection rule below keeps every candidate anyway.
+		// Whether the block renders ANY known marker decides how the rows below are
+		// filtered. When it does, the font is one we know and every other private-use
+		// glyph is a stray. When it does not, the dialog uses an alternate icon set: no
+		// known glyph exists to compare against, so its rows cannot be told from a stray
+		// and all of them are kept.
+		const knownFont = candidates.some(candidate => candidate.known);
+		// `modalGlyph` stays null when a known font checks every row (no empty marker
+		// exists): the mode then comes from the header or hint fallbacks, and the checks
+		// below keep each known row on its own merits.
 		// A checked row renders U+F14A where an unchecked one renders U+F096/U+F10C, so
 		// the checked glyph is a variant of the same marker rather than a different one.
 		const sameMarker = (glyph, reference) =>
 			glyph === reference || (glyph === CHECKED_GLYPH && reference !== CHECKED_GLYPH);
-		box.markerGlyph = modalGlyph;
+		box.markerGlyph = knownFont ? modalGlyph : null;
 		for (const row of candidates) {
-			// Keep the focused row unconditionally, plus any row sharing the block's
-			// marker glyph. A row with a different glyph is dropped — either a stray, or a
-			// real row in a font build whose marker differs from the block's, which the
-			// vote above already decided against.
-			if (!row.focus && modalGlyph !== null && !sameMarker(row.marker, modalGlyph)) continue;
+			// Keep the focused row unconditionally (it is an option by definition), and in
+			// an alternate icon set every other candidate too. In a known font a row is kept
+			// only when its glyph belongs to the block's marker family: a different or
+			// unknown glyph marks a stray, whose presence would shift focusRow and with it
+			// every dictated index.
+			if (!row.focus && knownFont && (!row.known || (modalGlyph !== null && !sameMarker(row.marker, modalGlyph)))) continue;
 			// The `Other (type your own)` row is the free-text affordance, not one of
 			// the offered options.
 			if (/^Other \(type your own\)$/.test(row.label)) continue;
