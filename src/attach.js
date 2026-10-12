@@ -94,6 +94,25 @@ export class AttachSession {
 	 * can finish before the swap), the tail rewinds to that record so the answer
 	 * the wearer is waiting for still paints. Timestamp dedup keeps it single.
 	 */
+	/**
+	 * True when `path` is not newer than the transcript we already follow.
+	 *
+	 * Both stats are guarded because either file can rotate away between the existsSync checks
+	 * and the stat — a session being pruned, or a bucket being cleaned. Unguarded, that throws
+	 * out of the prompt path and the wearer's prompt is dropped for a 500 that also carries the
+	 * absolute transcript path. Every other rotation probe in this file is guarded the same way.
+	 */
+	#isOlderThan(path) {
+		try {
+			if (!existsSync(this.transcriptPath)) return false;
+			return statSync(this.transcriptPath).mtimeMs > statSync(path).mtimeMs;
+		} catch {
+			// A stat that cannot complete means the question cannot be answered; treat the file as
+			// not-older so the caller proceeds to #resumeOffset, which guards its own read.
+			return false;
+		}
+	}
+
 	adoptTranscript(path) {
 		if (!path || path === this.transcriptPath) return;
 		if (!existsSync(path)) return;
