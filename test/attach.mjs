@@ -341,7 +341,7 @@ console.log("answer paths");
 		check("recommended suffix is kept in the label", parsed?.options[0]?.label === "Yes (Recommended)", JSON.stringify(parsed?.options.map(o => o.label)));
 		check("recommended suffix is not read as a multi signal alone", parsed?.multi === true, String(parsed?.multi));
 		const byVisible = await trial({ labels: ["Yes (Recommended)", "No"], dictation: "Yes" });
-		check('dictating the visible row "Yes" resolves', byVisible.answered === true && byVisible.pane.focus === 0, JSON.stringify({ answered: byVisible.answered, focus: byVisible.pane.focus }));
+		check('dictating the visible row "Yes" resolves', byVisible.answered?.ok === true && byVisible.pane.focus === 0, JSON.stringify({ answered: byVisible.answered, focus: byVisible.pane.focus }));
 	}
 
 	// A permission card whose menu could not be located must NOT be answered. The old code fell
@@ -369,8 +369,8 @@ console.log("answer paths");
 			"│ ↑/↓ navigate  󰌑 select  󱊷 cancel │", "╰────────────────────╯",
 		].join("\n");
 		const noFocus = await session.answerPermission("allow");
-		check("a permission pair with no focused row is refused",
-			noFocus === false && keys.length === 0,
+		check("a permission pair with no focused row is refused, with a reason",
+			noFocus.ok === false && /selected/.test(noFocus.reason) && keys.length === 0,
 			JSON.stringify({ noFocus, keys }));
 
 		// The hint bar is a precondition, not decoration: a card caught mid-repaint can show the
@@ -381,8 +381,8 @@ console.log("answer paths");
 		].join("\n");
 		keys = [];
 		const noBar = await session.answerPermission("allow");
-		check("a card whose hint bar has not painted is refused",
-			noBar === false && keys.length === 0,
+		check("a card whose hint bar has not painted is refused, with a reason",
+			noBar.ok === false && typeof noBar.reason === "string" && noBar.reason.length > 0 && keys.length === 0,
 			JSON.stringify({ noBar, keys }));
 
 		// A permission card whose choices the parser cannot find (no hint bar, no choice rows at
@@ -390,7 +390,7 @@ console.log("answer paths");
 		session.capture = async () => ["╭─ Allow tool: bash ─╮", "│ Command: x │", "│ │", "╰────────────────────╯"].join("\n");
 		const allowed = await session.answerPermission("allow");
 		check("an unparseable permission card is refused, not Entered",
-			allowed === false && !keys.includes("Enter"),
+			allowed.ok === false && keys.length === 0,
 			JSON.stringify({ allowed, keys }));
 	}
 
@@ -400,7 +400,7 @@ console.log("answer paths");
 		const ambiguous = await trial({ labels: ["HTTP/2", "HTTP/2 (restated)"], dictation: "http 2" });
 		check("ambiguous label match refuses instead of Entering a row", ambiguous.answered === false, JSON.stringify({ answered: ambiguous.answered, keys: ambiguous.sends }));
 		const unambiguous = await trial({ labels: ["HTTP/2", "HTTP/1.1"], dictation: "http 2" });
-		check("unambiguous label match still resolves", unambiguous.answered === true && unambiguous.pane.focus === 0);
+		check("unambiguous label match still resolves", unambiguous.answered?.ok === true && unambiguous.pane.focus === 0);
 	}
 
 	// A stray framed row must never win regardless of where it sits or how the

@@ -561,10 +561,15 @@ export function createBridge(config) {
 		if (req.method === "POST" && path === "/api/permission-response") {
 			const { sessionId, decision } = (await readJson(req)) ?? {};
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
-			const session = dropIfDead(getLive(sessionId));
+			// Adopt on demand: /api/sessions lists every desk pane the scan finds, but only an adopted
+			// session is in `sessions`. Without this a client answering from a freshly listed id got
+			// 404 "Session not found" for a session it had just been told about.
+			const session = await resolveTarget(sessionId).catch(() => dropIfDead(getLive(sessionId)));
 			if (!session) return sendJson(res, 404, { error: "Session not found" });
-			const accepted = await session.answerPermission(decision || "deny");
-			if (!accepted) return sendJson(res, 400, { error: "No permission request is pending" });
+			// The refusal reason travels to the client: "nothing is pending" and "the card was not
+			// understood" are different situations, and only the first one means "do nothing".
+			const answered = await session.answerPermission(decision || "deny");
+			if (!answered.ok) return sendJson(res, 409, { error: answered.reason });
 			return sendJson(res, 200, { ok: true });
 		}
 
@@ -573,10 +578,10 @@ export function createBridge(config) {
 			const { sessionId, answer } = body;
 			log.info(`question-response raw=${JSON.stringify(answer)?.slice(0, 200)} (sessionId=${sessionId ?? "-"})`);
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
-			const session = dropIfDead(getLive(sessionId));
+			const session = await resolveTarget(sessionId).catch(() => dropIfDead(getLive(sessionId)));
 			if (!session) return sendJson(res, 404, { error: "Session not found" });
 			const accepted = await session.answerQuestion(answer ?? "skip");
-			if (!accepted) return sendJson(res, 400, { error: "No question is pending" });
+			if (!accepted) return sendJson(res, 409, { error: "the question could not be answered from this card" });
 			return sendJson(res, 200, { ok: true });
 		}
 

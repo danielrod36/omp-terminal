@@ -344,7 +344,7 @@ export class OwnedSession {
 		const entry = [...this.pendingDialogs.entries()].find(
 			([, frame]) => frame.method === "select" || frame.method === "confirm",
 		);
-		if (!entry) return false;
+		if (!entry) return { ok: false, reason: "no permission card is on screen" };
 		const [id, frame] = entry;
 		this.pendingDialogs.delete(id);
 		const approved = decision === "allow" || decision === "allowAlways";
@@ -360,7 +360,9 @@ export class OwnedSession {
 		);
 		this.state = "busy";
 		emit(this.id, statusFrame(this.id, "busy", this.provider));
-		return true;
+		// Same contract as the attach session: `{ ok, reason }`, never a bare boolean, so the
+		// server can tell "nothing is pending" from "the card could not be answered".
+		return { ok: true };
 	}
 
 	async answerQuestion(rawAnswer) {

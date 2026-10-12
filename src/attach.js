@@ -499,16 +499,23 @@ export class AttachSession {
 	async answerPermission(decision) {
 		const pane = await this.capture();
 		const dialog = readDialogFromPane(pane);
-		if (!dialog || dialog.kind !== "permission") return false;
+		// A refusal is reported as `{ ok: false, reason }`, never a bare `false`: the caller has to
+		// tell "no permission is pending" (nothing to answer) from "the card is there but was not
+		// understood" (answer at the desk), and a single boolean flattened both into one 400.
+		if (!dialog || dialog.kind !== "permission") return { ok: false, reason: "no permission card is on screen" };
 		const approved = decision === "allow" || decision === "allowAlways";
 		// Find the row by label: the desk user may have moved the cursor, so the
 		// menu is not guaranteed to open on Approve.
 		const options = dialog.options ?? [];
 		// An unknown focus makes the cursor delta meaningless: sending Enter would submit whatever
 		// row the desk has highlighted, which need not be the one the wearer named.
+		if (options.length === 0) {
+			log.warn(`attach ${this.id} found no answerable rows on the permission card; refusing`);
+			return { ok: false, reason: "the card's rows are not in a shape this bridge recognises" };
+		}
 		if (!Number.isInteger(dialog.focusedIndex) || dialog.focusedIndex < 0) {
 			log.warn(`attach ${this.id} does not know which permission row is focused; refusing`);
-			return false;
+			return { ok: false, reason: "the card does not show which row is selected" };
 		}
 		const target = options.findIndex(option => (approved ? /^(Approve|Yes)$/i : /^(Deny|No)$/i).test(option.label));
 		// No matching row means the card was not understood — a parse that found no options, or a
@@ -517,11 +524,11 @@ export class AttachSession {
 		// nothing is approved by accident.
 		if (target < 0) {
 			log.warn(`attach ${this.id} could not find an ${approved ? "approve" : "deny"} row; refusing to press Enter`);
-			return false;
+			return { ok: false, reason: `the card does not offer a row matching ${approved ? "approve" : "deny"}` };
 		}
 		const steps = target - (dialog.focusedIndex ?? 0);
-		if (!(await this.#moveCursor(steps))) return false;
-		if (!(await this.send("Enter", { enter: false }))) return false;
+		if (!(await this.#moveCursor(steps))) return { ok: false, reason: "the cursor could not be moved to the selected row" };
+		if (!(await this.send("Enter", { enter: false }))) return { ok: false, reason: "the key could not be delivered to the desk" };
 		return this.#answered();
 	}
 
@@ -583,7 +590,7 @@ export class AttachSession {
 		this.lastDialogSignature = "";
 		this.state = "busy";
 		emit(this.id, statusFrame(this.id, "busy", this.provider));
-		return true;
+		return { ok: true };
 	}
 
 	async interrupt() {
