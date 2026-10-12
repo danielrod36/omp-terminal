@@ -1,4 +1,4 @@
-import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { basename, join, resolve, sep } from "node:path";
 import { createLogger } from "./log.js";
 
@@ -265,15 +265,22 @@ function isInsideSessionsRoot(config, file) {
 	const root = config.sessionsRoot;
 	if (!root) return false;
 	let resolvedRoot;
-	let resolvedFile;
+	let realRoot;
+	let realFile;
 	try {
 		resolvedRoot = resolve(root);
-		resolvedFile = resolve(file);
+		// realpath, not resolve: resolve() is LEXICAL, so a symlink placed inside the root passes a
+		// resolve-based check while pointing anywhere on the host — measured: a symlink at
+		// <root>/link.jsonl to an outside file was parsed and its title served. Comparing real paths
+		// is what actually confines the read.
+		realRoot = realpathSync(resolvedRoot);
+		realFile = realpathSync(file);
 	} catch {
+		// A path whose realpath cannot be taken (missing, or a broken link) is not a transcript.
 		return false;
 	}
-	const prefix = resolvedRoot.endsWith(sep) ? resolvedRoot : resolvedRoot + sep;
-	return resolvedFile === resolvedRoot || resolvedFile.startsWith(prefix);
+	const prefix = realRoot.endsWith(sep) ? realRoot : realRoot + sep;
+	return realFile === realRoot || realFile.startsWith(prefix);
 }
 
 export function findOmpSession(config, idOrPath) {

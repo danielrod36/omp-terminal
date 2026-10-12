@@ -9,7 +9,7 @@
  *
  * Usage: node test/smoke.mjs [--no-omp]
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config.js";
@@ -289,6 +289,21 @@ console.log("auth and path confinement");
 	writeFileSync(escape, `${JSON.stringify({ type: "title", title: "escaped" })}\n`);
 	check("nor via a traversal out of the root to a real file", existsSync(escape) && findOmpSession(config, escape) === null);
 	check("a non-string session id is an unknown id, not a throw", findOmpSession(config, 123) === null);
+	// Confinement must follow symlinks. resolve() is lexical, so a link inside the root pointing
+	// anywhere on the host used to pass the check while its target was parsed and served.
+	const secretDir = join(workDir, "secret");
+	mkdirSync(secretDir, { recursive: true });
+	const secret = join(secretDir, "outside-target.jsonl");
+	writeFileSync(secret, `${JSON.stringify({ type: "title", title: "SECRET" })}\n`);
+	const link = join(config.sessionsRoot, "link.jsonl");
+	symlinkSync(secret, link);
+	check("a symlink inside the root does not yield an outside file",
+		findOmpSession(config, link) === null,
+		JSON.stringify(findOmpSession(config, link)?.title));
+	// An in-root transcript must still resolve, so the check is not over-broad.
+	const inside = join(config.sessionsRoot, "inside.jsonl");
+	writeFileSync(inside, `${JSON.stringify({ type: "title", title: "ok" })}\n`);
+	check("an in-root transcript still resolves", findOmpSession(config, inside) !== null);
 	check("the store scan still returns sessions", Array.isArray(listOmpSessions(config, { limit: 1 })));
 	// A listing must not parse every transcript to return a few: the options object is the
 	// signature, and `limit` bounds the WORK, not just the result slice.

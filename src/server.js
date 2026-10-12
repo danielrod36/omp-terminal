@@ -511,6 +511,13 @@ export function createBridge(config) {
 			} catch {
 				return sendJson(res, 400, { error: "malformed session id in path" });
 			}
+			// An id is opaque: a percent-encoded slash survives URL pathname parsing, so
+			// `/api/sessions/a%2Fb.jsonl/history` decodes to a value with separators and would reach
+			// the filesystem branch in findOmpSession. Refuse it here, where the HTTP surface can see
+			// it, rather than relying on the containment check downstream.
+			if (id.includes("/") || id.includes("\\")) {
+				return sendJson(res, 400, { error: "session id must not contain a path separator" });
+			}
 			const limit = Math.min(Number(url.searchParams.get("limit")) || config.historyLimit, 20);
 			try {
 				// A bridge-owned session knows its exact transcript; a desk
