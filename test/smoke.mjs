@@ -361,20 +361,22 @@ console.log("sse ring lifecycle");
 		`armed=${armed} ended=${stalledRes.ended} tornDown=${stalledRes[marker] === undefined}`,
 	);
 
-	// A class is capped: every member costs a frame write on every emit, so a caller
-	// rotating prefix ids must not be able to make each frame O(invented ids). But the cap
-	// EVICTS old members — it must never refuse the arriving id, or hostile ids would fill
-	// the class and mute every later, genuinely subscribed, client for as long as the
-	// session lives.
+	// Every id of a session shares ONE ring: a per-id ring would copy each frame once per id,
+	// so memory would grow with the ids a caller can invent and forgetting an id would throw
+	// its history away. The cap therefore bounds the LOOKUP, never the frames.
 	events.emit("cap", { type: "user_prompt", text: "hi" });
-	for (let i = 0; i < 200; i++) events.linkSessions(`cap-alias-${i}`, "cap");
-	// The id that just linked must still be reachable, even after the class overflowed.
+	for (let i = 0; i < 400; i++) events.linkSessions(`cap-alias-${i}`, "cap");
 	events.emit("cap", { type: "text_delta", text: "x" });
-	check("the arriving id is never evicted by the class cap",
-		events.getMessages("cap-alias-199", 0).length > 0,
-		`alias199 fanned=${events.getMessages("cap-alias-199", 0).length > 0}`);
-	check("an early alias is the one evicted", events.getMessages("cap-alias-0", 0).length === 0,
-		`alias0 fanned=${events.getMessages("cap-alias-0", 0).length > 0}`);
+	// 401 ids, one ring: two entries, not 401 copies.
+	check("ids of one session share a single ring",
+		events.historyFromRing("cap-alias-399", 50).length === 1 &&
+		events.getMessages("cap", 0).length === 2,
+		`history=${events.historyFromRing("cap-alias-399", 50).length} ring=${events.getMessages("cap", 0).length}`);
+	check("an id past the lookup cap still shares the ring",
+		events.getMessages("cap-alias-399", 0).length > 0,
+		`alias399 messages=${events.getMessages("cap-alias-399", 0).length}`);
+	check("the canonical id keeps its own ring", events.getMessages("cap", 0).length === 2,
+		`canonical=${events.getMessages("cap", 0).length}`);
 
 	events.linkSessions("ring-alias2", "ring-canon2");
 	events.emit("ring-canon2", { type: "user_prompt", text: "x" });

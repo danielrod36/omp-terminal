@@ -8,6 +8,13 @@ const log = createLogger("sse");
  * Wire-compatible with @evenrealities/even-terminal (`dist/routes/events.js`):
  * `id:`/`data:` frames, a 500-entry ring, a 15 s `:heartbeat`, and a replay
  * cursor so a frame broadcast while the glasses were dark still paints.
+ *
+ * Several ids can name one session: the app subscribes under the id it was told,
+ * and omp only reports its canonical id once the child is running. Those ids form
+ * an equivalence CLASS, and the class owns ONE ring and ONE client set. That is
+ * the whole reason a class exists — a per-id ring would copy every frame once per
+ * id, so memory would grow with the number of ids a caller can invent, and
+ * forgetting an id would throw its history away.
  */
 const MAX_MESSAGES_PER_SESSION = 500;
 const HEARTBEAT_MS = 15_000;
@@ -17,10 +24,10 @@ const HEARTBEAT_MS = 15_000;
  */
 const MAX_CLIENT_BUFFER_BYTES = 4 * 1024 * 1024;
 /**
- * Most ids one equivalence class may hold. Every member costs a ring push and a frame write
- * per emit, so the class is capped rather than allowed to grow with a caller's invented ids.
+ * Most ids one class may keep a lookup for. Ids cost a map entry and a Set slot, not a
+ * ring, so this only bounds the lookup itself; frames are written once per client.
  */
-const MAX_IDS_PER_CLASS = 32;
+const MAX_IDS_PER_CLASS = 256;
 
 /**
  * Marker for the teardown attached to each attached response, so any path that removes a
@@ -28,173 +35,135 @@ const MAX_IDS_PER_CLASS = 32;
  */
 const DISPOSE = Symbol.for("omp-terminal.dispose");
 
+/** id -> its class. Every id of a class points at the same object. */
 const sessions = new Map();
-/** Equivalence classes of session ids that must receive each other's frames. */
-const idLinks = new Map();
 
-function ensureSession(sessionId) {
-	let session = sessions.get(sessionId);
-	if (!session) {
-		session = { messages: [], clients: new Set(), nextId: 1, lastDeliveredId: 0 };
-		sessions.set(sessionId, session);
+/** The class an id belongs to, creating one when it is new. */
+function ensureClass(id) {
+	let cls = sessions.get(id);
+	if (!cls) {
+		cls = { ids: new Set([id]), messages: [], clients: new Set(), nextId: 1, lastDeliveredId: 0 };
+		sessions.set(id, cls);
 	}
-	return session;
-}
-
-function idClass(id) {
-	let set = idLinks.get(id);
-	if (!set) {
-		set = new Set([id]);
-		idLinks.set(id, set);
-	}
-	return set;
+	return cls;
 }
 
 /**
- * Make two ids share every future frame.
+ * Merge two ids' classes so they share one ring.
  *
- * An owned session learns omp's canonical id only after its child is running,
- * but the app may already be subscribed to the id it was told. Linking the two
- * means whichever identity the app holds, the answer still reaches its ring.
+ * An owned session learns omp's canonical id only after its child is running, but
+ * the app may already be subscribed to the id it was told, so whichever identity
+ * either side holds the frames must land in the same ring.
  */
 export function linkSessions(left, right) {
 	if (!left || !right || left === right) return;
-	const classLeft = idClass(left);
-	const classRight = idClass(right);
-	if (classLeft === classRight) return;
-	// A class exists only to bridge the ids a client already holds to the session's
-	// canonical one. An unbounded class is not merely memory: `emit` writes one frame per
-	// member, so a caller rotating prefix ids made every frame cost O(ids) — measured 229x
-	// for 1000 aliases.
-	//
-	// The cap EVICTS the stalest members rather than refusing the new id. Refusing would be a
-	// lockout, not a limit: once hostile ids fill a class, every later — genuinely
-	// subscribed — id would be muted for as long as the session lives, because nothing
-	// shrinks the class. Both sides merge first, so the survivor set is the merged one and a
-	// freshly-arriving id can never be dropped in favour of ids that arrived before it.
-	// Merge the SMALLER class into the larger one, so the established class (usually the
-	// canonical session's ring) keeps its insertion order and the arriving id is appended
-	// last. Merging the other way would make the arrival the oldest member and the trim
-	// below would evict the client that just subscribed.
-	const [target, source] = classLeft.size >= classRight.size ? [classLeft, classRight] : [classRight, classLeft];
-	for (const id of source) {
-		if (target.has(id)) continue;
-		target.add(id);
-		idLinks.set(id, target);
+	const leftClass = ensureClass(left);
+	const rightClass = ensureClass(right);
+	if (leftClass === rightClass) return;
+	// Keep the larger (established) class as the survivor, so the ids that have been around
+	// longest keep their ring. Merging the other way is harmless for the ring, which is
+	// shared either way, but this keeps the survivor stable across repeated links.
+	const [target, source] = leftClass.ids.size >= rightClass.ids.size ? [leftClass, rightClass] : [rightClass, leftClass];
+	if (target.messages.length === 0 && source.messages.length > 0) {
+		target.messages = source.messages;
+		target.nextId = source.nextId;
+		target.lastDeliveredId = source.lastDeliveredId;
 	}
-	// Trim to the cap, evicting the OLDEST members first — except never the two ids just
-	// linked, and never an id with an attached client. Ordering by insertion is what makes
-	// "oldest" meaningful, and excluding the linked pair is what keeps the arrival reachable
-	// no matter which class the merge happened to grow.
+	for (const id of source.ids) {
+		target.ids.add(id);
+		sessions.set(id, target);
+	}
+	// Bound the lookup by forgetting the stalest ids. This drops only the name: the ring is
+	// the class's, so a forgotten id loses no history, and `linkSessions` or a prompt
+	// re-establishes it. The ids linked just now are never the ones forgotten, so the caller
+	// that is acting right now always stays reachable.
 	const protectedIds = new Set([left, right]);
-	const members = [...target];
-	const excess = Math.max(0, members.length - MAX_IDS_PER_CLASS);
-	let evicted = 0;
-	for (const id of members) {
-		if (evicted >= excess) break;
+	const excess = Math.max(0, target.ids.size - MAX_IDS_PER_CLASS);
+	let forgotten = 0;
+	for (const id of target.ids) {
+		if (forgotten >= excess) break;
 		if (protectedIds.has(id)) continue;
-		if (sessions.get(id)?.clients.size > 0) continue; // a live SSE client keeps its id
-		target.delete(id);
-		idLinks.delete(id);
-		// Release the evicted id's ring as well. Leaving it would mean the cap bounds
-		// fan-out but not memory: the ring holds up to MAX_MESSAGES_PER_SESSION frames, and
-		// nothing else ever frees an id the class walk can no longer reach (measured 591 MB
-		// retained from 800 evicted, fully-buffered ids).
+		target.ids.delete(id);
 		sessions.delete(id);
-		evicted++;
-		log.warn(`evicted stale session id ${id} from a class at the ${MAX_IDS_PER_CLASS}-id cap`);
+		forgotten++;
+		log.warn(`forgot stale session id ${id} from a class at the ${MAX_IDS_PER_CLASS}-id cap`);
 	}
-	log.debug(`linked session ids ${[...target].join(" = ")}`);
+	log.debug(`linked session ids ${[...target.ids].join(" = ")}`);
 }
 
 /**
- * Drop a session's ring once nothing can read it again.
+ * Drop a class's ring once nothing can read it again.
  *
  * Every ring holds up to MAX_MESSAGES_PER_SESSION frames, and a fresh conversation
  * mints a fresh id, so without this a long-lived bridge accumulates one ring per
  * conversation ever started (measured: ~0.84 MB each) until it runs out of memory.
- * The ring is kept while clients are attached or while it is an alias of a live id,
- * so an app that reconnects to a just-finished session still gets its replay.
+ * The ring is kept while any client of the class is attached, so an app that
+ * reconnects to a just-finished session still gets its replay.
  */
 export function dropSession(sessionId) {
-	const links = idLinks.get(sessionId);
-	// A linked class dies together: the ids are one session under two names, so its
-	// rings are only reclaimable when none of them has a live client. Without this the
-	// alias ring — which holds a full copy of every frame, since `emit` writes into each
-	// ring in the class — outlives the canonical one and the class leaks anyway.
-	const ids = links ? [...links] : [sessionId];
-	for (const id of ids) {
-		const session = sessions.get(id);
-		if (session && session.clients.size > 0) return false;
-	}
-	let dropped = false;
-	for (const id of ids) {
-		if (sessions.delete(id)) dropped = true;
-		if (links) idLinks.delete(id);
-	}
-	if (dropped) log.debug(`dropped ring(s) for ${ids.join(" = ")}`);
-	return dropped;
+	const cls = sessions.get(sessionId);
+	if (!cls) return false;
+	if (cls.clients.size > 0) return false;
+	for (const id of cls.ids) sessions.delete(id);
+	log.debug(`dropped ring for ${[...cls.ids].join(" = ")}`);
+	return true;
 }
 
-/** Append to the ring and fan out live. Returns the primary ring id. */
+/** Append to the ring and fan out live. Returns the ring id of the new entry. */
 export function emit(sessionId, message) {
 	if (!sessionId) return 0;
+	const cls = ensureClass(sessionId);
 	const data = JSON.stringify(message);
-	let primaryId = 0;
-	for (const targetId of idClass(sessionId)) {
-		const session = ensureSession(targetId);
-		const id = session.nextId++;
-		session.messages.push({ id, message });
-		if (session.messages.length > MAX_MESSAGES_PER_SESSION) session.messages.shift();
-		if (targetId === sessionId) primaryId = id;
+	const id = cls.nextId++;
+	cls.messages.push({ id, message });
+	if (cls.messages.length > MAX_MESSAGES_PER_SESSION) cls.messages.shift();
 
-		log.debug(`${targetId} emit id=${id} type=${message.type}${message.state ? `/${message.state}` : ""}`);
-		if (session.clients.size === 0) {
-			if (message.type === "text_delta" || message.type === "result") {
-				log.warn(`${targetId} content frame '${message.type}' broadcast with no live client (id=${id})`);
+	log.debug(`${sessionId} emit id=${id} type=${message.type}${message.state ? `/${message.state}` : ""}`);
+	if (cls.clients.size === 0) {
+		if (message.type === "text_delta" || message.type === "result") {
+			log.warn(`${sessionId} content frame '${message.type}' broadcast with no live client (id=${id})`);
+		}
+		return id;
+	}
+	let dead = 0;
+	for (const client of cls.clients) {
+		// A client that stops reading (asleep phone, wedged radio) never triggers 'close', so
+		// without this its unsent frames accumulate in userspace without bound — measured: 20k
+		// frames buffered 30 MB for one silent client. Dropping it loses nothing: the ring
+		// keeps the frames and the reconnect replays them from the cursor, which is the same
+		// path a dark-lens reconnect already takes. `writableLength` is undefined on the fakes
+		// tests pass in, which reads as idle.
+		if ((client.writableLength ?? 0) > MAX_CLIENT_BUFFER_BYTES) {
+			log.warn(`${sessionId} dropping a client ${client.writableLength} bytes behind; it can replay on reconnect`);
+			try {
+				client.end?.();
+			} catch {
+				/* already gone */
 			}
+			// Stop its heartbeat as well: a timer still writing after `end()` would raise an
+			// unhandled 'error' event and crash the bridge.
+			client[DISPOSE]?.();
+			cls.clients.delete(client);
+			dead++;
 			continue;
 		}
-		let dead = 0;
-		for (const client of session.clients) {
-			// A client that stops reading (asleep phone, wedged radio) never triggers
-			// 'close', so without this its unsent frames accumulate in userspace without
-			// bound — measured: 20k frames buffered 30 MB for one silent client. Dropping it
-			// loses nothing: the ring keeps the frames and the reconnect replays them from
-			// the cursor, which is the same path a dark-lens reconnect already takes.
-			// `writableLength` is undefined on the fakes tests pass in, which reads as idle.
-			if ((client.writableLength ?? 0) > MAX_CLIENT_BUFFER_BYTES) {
-				log.warn(`${targetId} dropping a client ${client.writableLength} bytes behind; it can replay on reconnect`);
-				try {
-					client.end?.();
-				} catch {
-					/* already gone */
-				}
-				// Stop its heartbeat as well: a timer still writing after `end()` would
-				// raise an unhandled 'error' event and crash the bridge.
-				client[DISPOSE]?.();
-				session.clients.delete(client);
-				dead++;
-				continue;
-			}
-			try {
-				client.write(`id: ${id}\ndata: ${data}\n\n`);
-			} catch {
-				client[DISPOSE]?.();
-				session.clients.delete(client);
-				dead++;
-			}
+		try {
+			client.write(`id: ${id}\ndata: ${data}\n\n`);
+		} catch {
+			client[DISPOSE]?.();
+			cls.clients.delete(client);
+			dead++;
 		}
-		if (session.clients.size > 0) session.lastDeliveredId = id;
-		if (dead > 0) log.warn(`${targetId} dropped ${dead} dead client(s); ${session.clients.size} remain`);
 	}
-	return primaryId;
+	if (cls.clients.size > 0) cls.lastDeliveredId = id;
+	if (dead > 0) log.warn(`${sessionId} dropped ${dead} dead client(s); ${cls.clients.size} remain`);
+	return id;
 }
 
 export function getMessages(sessionId, after) {
-	const session = sessions.get(sessionId);
-	if (!session) return [];
-	return session.messages.filter(entry => entry.id > after).map(entry => ({ id: entry.id, ...entry.message }));
+	const cls = sessions.get(sessionId);
+	if (!cls) return [];
+	return cls.messages.filter(entry => entry.id > after).map(entry => ({ id: entry.id, ...entry.message }));
 }
 
 /**
@@ -202,16 +171,14 @@ export function getMessages(sessionId, after) {
  *
  * omp writes a transcript only when the session settles, so a history read
  * immediately after a turn can race the file's creation. The ring already holds
- * what the wearer saw, so it answers in the meantime.
+ * what the wearer saw, so it answers in the meantime. One ring per class, so no id
+ * can return the same turn twice.
  */
 export function historyFromRing(sessionId, limit = 10) {
-	// `emit` writes each message into every ring in the equivalence class, so
-	// concatenating the class would return every turn as many times as the class
-	// has ids. Read the primary ring only; the aliases hold the same entries.
-	const session = sessions.get(sessionId);
-	if (!session) return [];
+	const cls = sessions.get(sessionId);
+	if (!cls) return [];
 	const items = [];
-	for (const entry of session.messages) {
+	for (const entry of cls.messages) {
 		const message = entry.message;
 		if (message.type === "user_prompt" && message.text) items.push({ role: "user", text: message.text });
 		else if (message.type === "result" && message.text) items.push({ role: "assistant", text: message.text });
@@ -221,7 +188,7 @@ export function historyFromRing(sessionId, limit = 10) {
 
 export function totalClients() {
 	let total = 0;
-	for (const session of sessions.values()) total += session.clients.size;
+	for (const cls of new Set(sessions.values())) total += cls.clients.size;
 	return total;
 }
 
@@ -237,16 +204,16 @@ export function addClient(sessionId, res, needReplay, lastEventId) {
 	res.flushHeaders?.();
 	res.write(":ok\n\n");
 
-	const session = ensureSession(sessionId);
+	const cls = ensureClass(sessionId);
 	const parsedLast = Number(lastEventId);
-	const replayFrom = Number.isFinite(parsedLast) && parsedLast > 0 ? parsedLast : needReplay ? 0 : session.lastDeliveredId;
+	const replayFrom = Number.isFinite(parsedLast) && parsedLast > 0 ? parsedLast : needReplay ? 0 : cls.lastDeliveredId;
 	let replayed = 0;
 	let replayStalled = false;
-	for (const entry of session.messages) {
+	for (const entry of cls.messages) {
 		if (entry.id > replayFrom) {
-			// The replay burst is bounded by the ring, but a client that is already far
-			// behind must not be handed 500 more frames to buffer: stop and let the live
-			// path drop it on the next emit.
+			// The replay burst is bounded by the ring, but a client that is already far behind
+			// must not be handed 500 more frames to buffer: stop and let the live path drop it
+			// on the next emit.
 			if ((res.writableLength ?? 0) > MAX_CLIENT_BUFFER_BYTES) {
 				replayStalled = true;
 				break;
@@ -255,7 +222,7 @@ export function addClient(sessionId, res, needReplay, lastEventId) {
 			replayed++;
 		}
 	}
-	session.lastDeliveredId = session.nextId - 1;
+	cls.lastDeliveredId = cls.nextId - 1;
 	if (replayStalled) {
 		log.warn(`client ${sessionId} stalled during replay; dropping it`);
 		try {
@@ -264,20 +231,20 @@ export function addClient(sessionId, res, needReplay, lastEventId) {
 			/* already gone */
 		}
 		return () => {
-			session.clients.delete(res);
+			cls.clients.delete(res);
 		};
 	}
-	// The teardown lives on the response because `emit` has no reference to this closure,
-	// and every path that removes the client must run it — otherwise the heartbeat keeps
-	// ticking after `end()` and the resulting ERR_STREAM_WRITE_AFTER_END is an unhandled
-	// 'error' event that takes the whole bridge down.
+	// The teardown lives on the response because `emit` has no reference to this closure, and
+	// every path that removes the client must run it — otherwise the heartbeat keeps ticking
+	// after `end()` and the resulting ERR_STREAM_WRITE_AFTER_END is an unhandled 'error' event
+	// that takes the whole bridge down.
 	let heartbeat = null;
 	let disposed = false;
 	const dispose = () => {
 		if (disposed) return;
 		disposed = true;
-		if (heartbeat) clearInterval(heartbeat);
-		session.clients.delete(res);
+		clearInterval(heartbeat);
+		cls.clients.delete(res);
 		// Clear the marker so a caller can tell a torn-down client from a live one: a
 		// heartbeat still ticking after `end()` is the crash this guards against.
 		delete res[DISPOSE];
@@ -292,9 +259,9 @@ export function addClient(sessionId, res, needReplay, lastEventId) {
 		}
 	}, HEARTBEAT_MS);
 
-	session.clients.add(res);
+	cls.clients.add(res);
 	log.info(
-		`client connected ${sessionId} (replayFrom=${replayFrom} replayed=${replayed}/${session.messages.length} live=${session.clients.size} total=${totalClients()})`,
+		`client connected ${sessionId} (replayFrom=${replayFrom} replayed=${replayed}/${cls.messages.length} live=${cls.clients.size} total=${totalClients()})`,
 	);
 
 	// A write that fails asynchronously (the socket died under us) must not become an
@@ -306,4 +273,3 @@ export function addClient(sessionId, res, needReplay, lastEventId) {
 		log.info(`client disconnected ${sessionId} (total=${totalClients()})`);
 	};
 }
-
