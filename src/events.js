@@ -56,7 +56,7 @@ function ensureClass(id) {
 	touchId(id);
 	let cls = sessions.get(id);
 	if (!cls) {
-		cls = { ids: new Set([id]), emitId: id, firstEmit: null, messages: [], clients: new Set(), nextId: 1, lastDeliveredId: 0 };
+		cls = { ids: new Set([id]), emitId: id, firstEmit: null, firstEmitWarned: false, messages: [], clients: new Set(), nextId: 1, lastDeliveredId: 0 };
 		sessions.set(id, cls);
 	}
 	return cls;
@@ -183,11 +183,14 @@ export function emit(sessionId, message) {
 		// Remember which id first wrote to this class. Frames land in the class's one ring
 		// regardless, so this changes no behaviour.
 		cls.firstEmit = sessionId;
-	} else if (cls.firstEmit !== sessionId && cls.ids.size > 1) {
+	} else if (cls.firstEmit !== sessionId && cls.ids.size > 1 && !cls.firstEmitWarned) {
 		// Diagnostic only, and a narrow one: it reports an emit id that changed over time, as a
 		// caller id would if some future path emitted before adoption. It cannot see a swapped
 		// `linkSessions` argument, because that decides `emitId` before any emit has happened —
 		// and that case needs no warning anyway, since a shared ring delivers to every id.
+		// Latched: the divergence persists for the life of the class, so an unlatched warn would
+		// write once per frame for the whole session.
+		cls.firstEmitWarned = true;
 		log.warn(`emit under ${sessionId} after the class first emitted under ${cls.firstEmit}; frames share the ring but the id differs`);
 	}
 	const data = JSON.stringify(message);

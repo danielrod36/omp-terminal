@@ -376,6 +376,22 @@ console.log("sse ring lifecycle");
 	// keeps its name: the stream and the poll route both reach the class through it.
 	check("the canonical id keeps its own ring", events.getMessages("cap", 0).length === 2,
 		`canonical=${events.getMessages("cap", 0).length}`);
+	// A linked caller reads the canonical ring. The cap may later forget that caller's NAME —
+	// it is neither the emit id nor subscribed — which is why forgetting only ever drops the
+	// lookup: re-linking restores access to the same history.
+	{
+		events.linkSessions("tie-caller", "tie-canonical");
+		events.emit("tie-canonical", { type: "result", text: "x" });
+		check("a linked caller reads the canonical ring",
+			events.historyFromRing("tie-caller", 50).length === 1,
+			`caller=${events.historyFromRing("tie-caller", 50).length}`);
+		for (let i = 0; i < 400; i++) events.linkSessions(`tie-junk-${i}`, "tie-canonical");
+		events.linkSessions("tie-caller", "tie-canonical");
+		check("a forgotten caller recovers by re-linking, with its history intact",
+			events.historyFromRing("tie-caller", 50).length === 1,
+			`caller=${events.historyFromRing("tie-caller", 50).length}`);
+	}
+
 	// An emit under an alias of a multi-id class goes to the class's ONE ring: it must not be
 	// dropped (that would silence every subscriber) nor duplicated.
 	{
