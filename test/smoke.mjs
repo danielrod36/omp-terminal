@@ -72,10 +72,18 @@ console.log("sessions");
 	const response = await fetch(`${base}/api/sessions?limit=5`, { headers: auth });
 	const body = await response.json();
 	check("200 with session list", response.status === 200 && Array.isArray(body.sessions));
-	check(
-		"session shape",
-		body.sessions.every(s => s.id && s.provider === config.providerLabel && "status" in s),
-	);
+	// `every` over an empty list is true, and under --no-omp nothing ever starts a session, so
+	// this verified no row shape at all in CI. Assert on a non-empty list when there is one, and
+	// say so when there is not.
+	if (body.sessions.length > 0) {
+		check(
+			"session shape",
+			body.sessions.every(s => s.id && s.provider === config.providerLabel && "status" in s),
+			JSON.stringify(body.sessions[0]),
+		);
+	} else {
+		console.log("  ~ session shape not asserted: no session is running under --no-omp");
+	}
 }
 
 if (withOmp) {
@@ -313,7 +321,24 @@ console.log("auth and path confinement");
 	check("the store scan still returns sessions", Array.isArray(listOmpSessions(config, { limit: 1 })));
 	// A listing must not parse every transcript to return a few: the options object is the
 	// signature, and `limit` bounds the WORK, not just the result slice.
-	check("the store scan honours limit", listOmpSessions(config, { limit: 1 }).length <= 1, String(listOmpSessions(config, { limit: 1 }).length));
+	//
+	// Seeded with REAL two-record transcripts. Without a `session` record a candidate is skipped
+	// at `if (!head.sessionId) continue`, so the old `length <= 1` was satisfied by an empty list
+	// and would have passed however the limit were broken.
+	// The scan reads `<sessionsRoot>/<encoded-cwd>/*.jsonl`, so the seeds go in a bucket.
+	const seedDir = join(config.sessionsRoot, "seed-bucket");
+	mkdirSync(seedDir, { recursive: true });
+	for (const index of [1, 2, 3]) {
+		writeFileSync(
+			join(seedDir, `seed${index}.jsonl`),
+			`${JSON.stringify({ type: "title", title: `seed-${index}` })}\n` +
+			`${JSON.stringify({ type: "session", id: `seed-${index}`, cwd: config.cwd })}\n`,
+		);
+	}
+	const limited = listOmpSessions(config, { limit: 1 });
+	check("the store scan honours limit against real transcripts",
+		limited.length === 1,
+		JSON.stringify(limited.map(s => s.id)));
 }
 
 console.log("sse ring lifecycle");

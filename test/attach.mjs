@@ -456,6 +456,34 @@ console.log("answer paths");
 				JSON.stringify({ got, keys }));
 		}
 
+		// A number word names a row, and an ordinal names one too — but a mix of both ("the second
+		// one") names two different rows and must be refused, not silently resolved to whichever
+		// word the map happened to contain. It used to find only `one`, answer row 1, and press
+		// Enter on the wrong row.
+		for (const [dictated, wantIndex] of [
+			["first", 0],
+			["second", 1],
+			["third", 2],
+		]) {
+			session.capture = async () => questionPane;
+			keys = [];
+			const got = await session.answerQuestion(dictated);
+			// The focused row is row 1, so the right answer is proved by the NET cursor movement
+			// reaching the wanted row: `first` sends only Enter, the others move down and back.
+			const net = keys.filter(k => k === "Down").length - keys.filter(k => k === "Up").length;
+			check(`the ordinal "${dictated}" names row ${wantIndex + 1}`,
+				Boolean(got?.ok ?? got) && keys.includes("Enter") && net === wantIndex,
+				JSON.stringify({ got, keys, net }));
+		}
+		for (const mixed of ["the second one", "the third one"]) {
+			session.capture = async () => questionPane;
+			keys = [];
+			const got = await session.answerQuestion(mixed);
+			check(`an ordinal/cardinal mix ("${mixed}") is refused, not guessed`,
+				!(got?.ok ?? got) && keys.length === 0,
+				JSON.stringify({ got, keys }));
+		}
+
 		// The hint bar is a precondition, not decoration: a card caught mid-repaint can show the
 		// rows before the bar paints, and answering it would submit a row the wearer has not
 		// finished reading. Such a card must be unanswerable.

@@ -1039,11 +1039,7 @@ function splitOptionRow(content) {
 	const focused = FOCUS.test(text[0]) ? text[0] : null;
 	const afterFocus = focused ? text.slice(1).replace(/^\s+/, "") : text;
 	if (!afterFocus) return null;
-	// Offset of the marker within the row (before trimming): every real option row
-	// puts its marker at the same offset — measured across five live captures, the
-	// focus glyph occupies the column before it rather than displacing it.
-	const markerAt = content.length - afterFocus.length;
-	return { focus: focused, marker: afterFocus[0], label: afterFocus.slice(1).trim(), markerAt };
+	return { focus: focused, marker: afterFocus[0], label: afterFocus.slice(1).trim() };
 }
 
 const FOCUS = /[\uf054\u276f\u25b6]/;
@@ -1134,7 +1130,14 @@ function resolveRequestedIndex(text, options) {
 	// 3. A bare number token ("2", "two", "option 2"). Reached only when the
 	// dictation matched no label at all, so a numeric label reference cannot be
 	// mistaken for a row index.
-	const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+	// Ordinals count too. Without them "the second one" carried a single numeric token — the
+	// `one` of `second one` — resolved to row 1, and Enter was pressed on the wrong row. With
+	// both words present the text holds two numeric tokens and is refused as ambiguous, which is
+	// what an ordinal-plus-cardinal mix is.
+	const words = {
+		one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+		first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10,
+	};
 	const numericTokens = tokens.filter(token => /^\d+$/.test(token) || token in words);
 	if (numericTokens.length === 1) {
 		const numeric = /^\d+$/.test(numericTokens[0]) ? Number(numericTokens[0]) : words[numericTokens[0]];
