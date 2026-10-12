@@ -690,15 +690,18 @@ function readAskFromPane(lines) {
 	if (box.options.length === 0 || box.focusRow < 0 || box.framedRows === 0) return null;
 	const prompt = box.header.length > 0 ? box.header[box.header.length - 1] : "";
 	// Multi-select signals, most reliable first:
-	//  1. the option marker glyph — the square (U+F096) is multi, the circle
-	//     (U+F10C) is single, verified by a controlled A/B on one host;
-	//  2. the key-hint bar saying `toggle` rather than `select`;
-	//  3. any row rendered as a checked box;
-	//  4. the header's `Submit` affordance — the FIRST line of a two-line header
-	//     (`<id>  Submit` above the question), which single-select dialogs lack, so a
-	//     question merely mentioning the word cannot promote itself.
-	// The header check is a fallback only: the marker glyph is the primary signal
-	// and does not depend on wording that a future build could rephrase.
+	//  1. the key-hint bar — ASCII, so it does not depend on the font. It says `toggle` for
+	//     multi-select and `select` for single, and docs/PROTOCOL.md §2 already calls it the
+	//     authoritative signal. Measured on all eleven live captures: the hint and the marker
+	//     glyph agree every time (select+circle, toggle+square), so leading with the hint
+	//     changes nothing on real dialogs while surviving a font that renders a different glyph.
+	//  2. the option marker glyph — square (U+F096) multi, circle (U+F10C) single, verified by a
+	//     controlled A/B on one host. Used when the hint bar is absent or says neither word.
+	//  3. any row rendered as a checked box (more than one);
+	//  4. the header's `Submit` affordance — the FIRST line of a two-line header (`<id> Submit`
+	//     above the question). Last, because a multi-QUESTION dialog renders that tab bar while
+	//     each question is independently single- or multi-select, so it is the weakest claim.
+	const hintMulti = /\btoggle\b/.test(box.help) ? true : /\bselect\b/.test(box.help) ? false : null;
 	const glyphMulti = box.markerGlyph === "\uf096" ? true : box.markerGlyph === "\uf10c" ? false : null;
 	const headerSubmit = box.header.length >= 2 && /\bSubmit\s*$/.test(box.header[0]);
 	// The checked fallback requires MORE THAN ONE checked row: a single checked row is
@@ -706,8 +709,9 @@ function readAskFromPane(lines) {
 	// promote a single-select dialog to the multi path (where a dictated answer to an
 	// unchecked row would be dropped).
 	const multi =
+		hintMulti ??
 		glyphMulti ??
-		(/\btoggle\b/.test(box.help) || box.options.filter(option => option.checked).length > 1 || headerSubmit);
+		(box.options.filter(option => option.checked).length > 1 || headerSubmit);
 	return {
 		kind: "question",
 		toolName: "ask",

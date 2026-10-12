@@ -130,7 +130,11 @@ console.log("dialog properties");
 	// The marker glyph encodes the mode (measured by controlled A/B): a multi-select
 	// dialog renders U+F096 (square), a single-select one U+F10C (circle), and a
 	// selected row U+F14A.
-	const build = ({ labels, focus = 0, checked = [], multi = false, headerIcon = false, question = "Which?", hint = "select" }) => {
+	const build = ({ labels, focus = 0, checked = [], multi = false, headerIcon = false, question = "Which?", hint = null }) => {
+		// The hint bar follows the mode as it does live (measured: `toggle` on every multi
+		// capture, `select` on every single one). `null` means "no hint bar", which lets the
+		// marker glyph decide — the case the no-hint fixtures exist to cover.
+		if (hint === null) hint = multi ? "toggle" : "select";
 		const shape = multi ? SQUARE : MARK;
 		const lines = ["╭─ Ask ─╮"];
 		if (multi) lines.push(`│ ${headerIcon ? ICON + " " : ""}colour  Submit │`);
@@ -155,7 +159,7 @@ console.log("dialog properties");
 		["already-checked row", { labels: ["A", "B"], checked: [1], multi: true }, true],
 		["labels that begin with a glyph", { labels: ["● Low", "★ Star", "□ Box"] }, false],
 		["reworded hint bar", { labels: ["A", "B"], hint: "mark · confirm" }, false],
-		["no hint bar", { labels: ["A", "B"], hint: null }, false],
+		["no hint bar", { labels: ["A", "B"], hint: "" }, false],
 		["question mentioning Submit", { labels: ["A", "B"], question: "Should I submit?" }, false],
 	]) {
 		const parsed = readDialogFromPane(build(opts));
@@ -261,7 +265,7 @@ console.log("answer paths");
 	// A recommended option renders as `Yes (Recommended)`; the wearer dictates what
 	// they see, so the display suffix must not block the match.
 	{
-		const recommended = ["\u256d\u2500 Ask \u2500\u256e", "\u2502  tests    runner    Submit \u2502", "\u2502 Do you want tests? \u2502", "\u251c\u2500\u2500\u2500\u2504", `\u2502 ${FOCUS} ${SQUARE} Yes (Recommended) \u2502`, `\u2502   ${SQUARE} No \u2502`, `\u2502   ${MARK} Other (type your own) \u2502`, "\u2502  \u2502", "\u251c\u2500\u2500\u2500\u2504", "\u2502 select \u00b7 \u2190/\u2192 question \u00b7 \u2191/\u2193 \u2502", "\u2570\u2500\u2500\u2500\u256f"].join("\n");
+		const recommended = ["\u256d\u2500 Ask \u2500\u256e", "\u2502  tests    runner    Submit \u2502", "\u2502 Do you want tests? \u2502", "\u251c\u2500\u2500\u2500\u2504", `\u2502 ${FOCUS} ${SQUARE} Yes (Recommended) \u2502`, `\u2502   ${SQUARE} No \u2502`, `\u2502   ${MARK} Other (type your own) \u2502`, "\u2502  \u2502", "\u251c\u2500\u2500\u2500\u2504", "\u2502 toggle \u00b7 \u2190/\u2192 question \u00b7 \u2191/\u2193 \u2502", "\u2570\u2500\u2500\u2500\u256f"].join("\n");
 		const parsed = readDialogFromPane(recommended);
 		check("recommended suffix is kept in the label", parsed?.options[0]?.label === "Yes (Recommended)", JSON.stringify(parsed?.options.map(o => o.label)));
 		check("recommended suffix is not read as a multi signal alone", parsed?.multi === true, String(parsed?.multi));
@@ -357,6 +361,27 @@ console.log("answer paths");
 		check("a known font keeps a strict-lead row list and drops the stray", JSON.stringify(got2?.options.map(o => o.label)) === JSON.stringify(["A", "B"]), JSON.stringify(got2?.options.map(o => o.label)));
 	}
 
+	// The key-hint bar leads the mode decision because it is ASCII and the marker glyph is not.
+	// Before this, a dialog whose glyph and hint disagreed took the glyph's word: a multi-select
+	// question rendered with the circle glyph was answered as single, so every row the wearer named
+	// except the focused one was silently dropped. All eleven live captures agree on both signals,
+	// so this changes nothing on real dialogs and only helps a font that draws another glyph.
+	{
+		const mk = (glyph, hint) => [
+			"╭─ Ask ─╮", "│ Which? │", "├────┤",
+			`│ ${FOCUS} ${glyph} Blue │`, `│   ${glyph} Green │`,
+			"│ │", "├────┤", `│ ${hint} · ↑/↓ · cancel │`, "╰────╯",
+		].join("\n");
+		check("a toggle hint beats a circle marker",
+			readDialogFromPane(mk(MARK, "toggle"))?.multi === true,
+			String(readDialogFromPane(mk(MARK, "toggle"))?.multi));
+		check("a select hint beats a square marker",
+			readDialogFromPane(mk(SQUARE, "select"))?.multi === false,
+			String(readDialogFromPane(mk(SQUARE, "select"))?.multi));
+		check("circle + select stays single", readDialogFromPane(mk(MARK, "select"))?.multi === false);
+		check("square + toggle stays multi", readDialogFromPane(mk(SQUARE, "toggle"))?.multi === true);
+	}
+
 	// A multi-question dialog renders a tab bar ending in `Submit`, but each question
 	// is independently single- or multi-select. The tab-bar `Submit` must not promote a
 	// single-select question — the marker glyph decides. Captured live from omp 18.8.9.
@@ -410,7 +435,6 @@ console.log("answer paths");
 			`│   ${EXOTIC} B │`,
 			"│  │",
 			"├──────┤",
-			"│ select · ↑/↓ │",
 			"╰──────╯",
 		].join("\n");
 		const fallback = readDialogFromPane(fallbackPane);
