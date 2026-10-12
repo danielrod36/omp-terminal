@@ -620,14 +620,31 @@ export function readDialogFromPane(pane) {
 		//   │                        │
 		//   │ ↑/↓ navigate  \uf11c select  \uf1c5 cancel │
 		const body = [];
-		let hintIndex = -1;
 		for (let index = boxStart + 1; index < lines.length; index++) {
 			const trimmed = lines[index].trim();
 			if (/^[╰└]/.test(trimmed)) break;
-			const content = trimmed.replace(/^[│|]\s?/, "").replace(/\s?[│|]$/, "").trimEnd();
-			body.push(content);
-			// The hint bar names the keys the card accepts, and it is the last such line.
-			if (/\bnavigate\b|\bselect\b|\bcancel\b/.test(content)) hintIndex = body.length - 1;
+			body.push(trimmed.replace(/^[│|]\s?/, "").replace(/\s?[│|]$/, "").trimEnd());
+		}
+		// The choices are the run of choice rows directly above the hint bar, so the hint bar is the
+		// FIRST line at or after them that reads like one — not the last keyword-bearing line in the
+		// card. Taking the last made a body line that merely mentions `select` (a shell command, a
+		// diff) or a WRAPPED hint bar move the boundary below the real choices, which emptied the
+		// option list: the card then answered blind. Scanning forward from each candidate choice run
+		// keeps a mention harmless because the run itself is what locates the bar.
+		const isChoiceRow = content => /^([\uf054\u276f\u25b6\s]*)(Approve|Deny|Yes|No)\s*$/.exec(content) !== null;
+		const looksLikeHint = content => /\bnavigate\b|\bselect\b|\bcancel\b|\btoggle\b|\bsubmit\b/.test(content);
+		// The last choice row anywhere in the body, and the first hint-like line below it.
+		let hintIndex = -1;
+		for (let index = body.length - 1; index >= 0; index--) {
+			if (!isChoiceRow(body[index])) continue;
+			for (let after = index + 1; after < body.length; after++) {
+				if (!body[after]) continue;
+				if (looksLikeHint(body[after])) {
+					hintIndex = after;
+					break;
+				}
+			}
+			break;
 		}
 		// Walk back from just above the hint bar while the rows are still choices, skipping the
 		// blank rows the card may leave between them and the bar (measured: one blank line).

@@ -97,6 +97,35 @@ console.log("pane scraping");
 			JSON.stringify(ok2?.options.map(o => o.label)) === JSON.stringify(["Approve", "Deny"]),
 			JSON.stringify(ok2?.options.map(o => o.label)));
 
+		// The hint bar is located from the CHOICES, not as the last keyword-bearing line: a body
+		// line that merely mentions `select` (a shell command, a diff) or a wrapped hint bar used
+		// to move the boundary below the real choices and empty the option list, so the card was
+		// answered blind — an "allow" pressing Enter on whatever the cursor happened to sit on.
+		const mentions = card([
+			"│ Command: grep select data                                                    │",
+			"│                                                                              │",
+			"│  \uf054 Approve                                                                   │",
+			"│    Deny                                                                      │",
+			"│                                                                              │",
+			"│ ↑/↓ navigate  󰌑 select  󱊷 cancel                                             │",
+		]);
+		const m = readDialogFromPane(mentions);
+		check("a body line mentioning select does not move the choice boundary",
+			JSON.stringify(m?.options.map(o => o.label)) === JSON.stringify(["Approve", "Deny"]),
+			JSON.stringify(m?.options.map(o => o.label)));
+
+		const wrapped = card([
+			"│ Command: x                                                                   │",
+			"│  \uf054 Approve                                                                   │",
+			"│    Deny                                                                      │",
+			"│ ↑/↓ navigate                                                                 │",
+			"│ press select to confirm                                                      │",
+		]);
+		const w = readDialogFromPane(wrapped);
+		check("a wrapped hint bar still yields the choices",
+			JSON.stringify(w?.options.map(o => o.label)) === JSON.stringify(["Approve", "Deny"]),
+			JSON.stringify(w?.options.map(o => o.label)));
+
 		// A genuine Yes/No card must still parse.
 		const yesNo = card([
 			"│ Continue?                                                                    │",
