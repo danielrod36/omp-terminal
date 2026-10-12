@@ -572,21 +572,71 @@ export function readDialogFromPane(pane) {
 		}
 	}
 	if (boxStart >= 0) {
+		// Read the card in two passes. Its body can contain anything — a command, a diff, a file
+		// preview — so a row is only a CHOICE when it sits in the run of rows directly above the
+		// key-hint bar. Scoring every line for `Approve|Deny|Yes|No` (the previous shape) turned
+		// any body line reading `Yes` or `No` into an option: the list was inflated, the focus
+		// index shifted, and `answerPermission` then moved the cursor onto the phantom row and
+		// submitted THAT instead of Approve/Deny.
+		//
+		// Measured card (omp 18.8.9):
+		//   │ Command: echo HELLO-PERM │
+		//   │                        │
+		//   │  \uf054 Approve            │
+		//   │    Deny                 │
+		//   │                        │
+		//   │ ↑/↓ navigate  \uf11c select  \uf1c5 cancel │
 		const body = [];
-		const choices = [];
-		let focusRow = -1;
-		let rowIndex = -1;
+		let hintIndex = -1;
 		for (let index = boxStart + 1; index < lines.length; index++) {
 			const trimmed = lines[index].trim();
 			if (/^[╰└]/.test(trimmed)) break;
 			const content = trimmed.replace(/^[│|]\s?/, "").replace(/\s?[│|]$/, "").trimEnd();
 			body.push(content);
-			// The choice rows carry the focus marker (verified live on 18.8.9):
-			// `\uf054 Approve` / `   Deny`.
-			const choice = content.match(/^([\uf054\u276f\u25b6\s]*)(Approve|Deny|Yes|No)\s*$/);
-			if (choice) {
-				rowIndex++;
-				if (choice[1].includes("\uf054") || choice[1].includes("\u276f") || choice[1].includes("\u25b6")) focusRow = rowIndex;
+			// The hint bar names the keys the card accepts, and it is the last such line.
+			if (/\bnavigate\b|\bselect\b|\bcancel\b/.test(content)) hintIndex = body.length - 1;
+		}
+		// Walk back from just above the hint bar while the rows are still choices, skipping the
+		// blank rows the card may leave between them and the bar (measured: one blank line).
+		const choices = [];
+		let focusRow = -1;
+		if (hintIndex > 0) {
+			const rows = [];
+			for (let index = hintIndex - 1; index >= 0; index--) {
+				if (!body[index]) continue; // blank padding is not a boundary
+				const choice = body[index].match(/^([\uf054\u276f\u25b6\s]*)(Approve|Deny|Yes|No)\s*$/);
+				if (!choice) break;
+				rows.unshift({ label: choice[2], focused: /[\uf054\u276f\u25b6]/.test(choice[1]) });
+			}
+			// A permission card offers one positive and one negative row, so the run must END in a
+			// pair: {Approve, Deny} or {Yes, No}. Taking the trailing pair rather than requiring the
+			// whole run to be exactly two rows is what keeps a body line reading `Yes` that happens
+			// to sit directly above the choices from joining them — the misfire this branch exists to
+			// prevent — while still leaving the card answerable in that case.
+			const pairAt = (() => {
+				for (let index = rows.length - 2; index >= 0; index--) {
+					const [a, b] = [rows[index].label, rows[index + 1].label];
+					if ((a === "Approve" && b === "Deny") || (a === "Yes" && b === "No")) return index;
+				}
+				return -1;
+			})();
+			if (pairAt >= 0) {
+				for (let index = pairAt; index < rows.length; index++) {
+					if (rows[index].focused) focusRow = index - pairAt;
+					choices.push(rows[index].label);
+				}
+			} else if (rows.length === 1) {
+				// A partial render: a single focused positive/negative row still answers.
+				focusRow = 0;
+				choices.push(rows[0].label);
+			}
+		} else {
+			// No hint bar (an older or partial render): fall back to the first choice rows found,
+			// which is what the previous code did for every card.
+			for (const content of body) {
+				const choice = content.match(/^([\uf054\u276f\u25b6\s]*)(Approve|Deny|Yes|No)\s*$/);
+				if (!choice) continue;
+				if (/[\uf054\u276f\u25b6]/.test(choice[1])) focusRow = choices.length;
 				choices.push(choice[2]);
 			}
 		}

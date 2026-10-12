@@ -58,6 +58,57 @@ console.log("pane scraping");
 	].join("\n");
 	const parsed = readDialogFromPane(approvalPane);
 	check("approval box detected", parsed?.kind === "permission", JSON.stringify(parsed));
+
+	// A permission CARD's body can contain anything, including a line that is exactly `Yes` or
+	// `No`. Those must never become options: the list would inflate, the focus index shift, and
+	// answerPermission would move the cursor onto the phantom row and submit it instead of
+	// Approve/Deny — the wearer says "allow" and a different row is chosen.
+	{
+		const card = body => [
+			"╭─ Allow tool: bash ───────────────────────────────────────────────────────────╮",
+			...body,
+			"╰──────────────────────────────────────────────────────────────────────────────╯",
+		].join("\n");
+		const withBody = card([
+			"│ Command: ./check.sh                                                          │",
+			"│ output: Yes                                                                  │",
+			"│                                                                              │",
+			"│  \uf054 Approve                                                                   │",
+			"│    Deny                                                                      │",
+			"│                                                                              │",
+			"│ ↑/↓ navigate  󰌑 select  󱊷 cancel                                             │",
+			"│                                                                              │",
+		]);
+		const ok = readDialogFromPane(withBody);
+		check("a body line reading Yes is not an option",
+			JSON.stringify(ok?.options.map(o => o.label)) === JSON.stringify(["Approve", "Deny"]) && ok?.focusedIndex === 0,
+			JSON.stringify(ok?.options.map(o => o.label)) + " focus=" + ok?.focusedIndex);
+
+		// The same, with the body line directly above the choices and no blank row between them.
+		const adjacent = card([
+			"│ Command: ./check.sh                                                          │",
+			"│ Yes                                                                          │",
+			"│  \uf054 Approve                                                                   │",
+			"│    Deny                                                                      │",
+			"│ ↑/↓ navigate  󰌑 select  󱊷 cancel                                             │",
+		]);
+		const ok2 = readDialogFromPane(adjacent);
+		check("a bare Yes directly above the choices is not an option",
+			JSON.stringify(ok2?.options.map(o => o.label)) === JSON.stringify(["Approve", "Deny"]),
+			JSON.stringify(ok2?.options.map(o => o.label)));
+
+		// A genuine Yes/No card must still parse.
+		const yesNo = card([
+			"│ Continue?                                                                    │",
+			"│  \uf054 Yes                                                                      │",
+			"│    No                                                                        │",
+			"│ ↑/↓ navigate  󰌑 select  󱊷 cancel                                             │",
+		]);
+		const ok3 = readDialogFromPane(yesNo);
+		check("a Yes/No permission card still parses",
+			JSON.stringify(ok3?.options.map(o => o.label)) === JSON.stringify(["Yes", "No"]),
+			JSON.stringify(ok3?.options.map(o => o.label)));
+	}
 	check("tool name extracted", parsed?.toolName === "write", parsed?.toolName);
 	check("body carries the detail", parsed?.body.includes("attach-probe2.txt"));
 

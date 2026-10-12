@@ -181,7 +181,12 @@ export function listOmpSessions(config, { limit = 50 } = {}) {
 	} catch {
 		return [];
 	}
-	const out = [];
+	// Collect cheap candidates first: a stat per transcript, newest first, and parse only until
+	// `limit` rows exist. Parsing every file up front made each request O(total transcript bytes)
+	// of synchronous I/O — measured on this host's store (354 transcripts, ~602 MB) a limit=1
+	// listing still took 111 ms and touched every file, because `limit` was applied to the result
+	// slice only, after every parseHead (64 KiB) plus deriveStatus (256 KiB tail) had run.
+	const candidates = [];
 	for (const dirName of rootEntries) {
 		const dir = join(root, dirName);
 		let entries;
@@ -193,31 +198,36 @@ export function listOmpSessions(config, { limit = 50 } = {}) {
 		}
 		for (const name of entries) {
 			const file = join(dir, name);
-			let stat;
 			try {
-				stat = statSync(file);
+				const stat = statSync(file);
+				if (stat.size === 0) continue;
+				candidates.push({ file, modified: stat.mtimeMs, size: stat.size });
 			} catch {
 				continue;
 			}
-			if (stat.size === 0) continue;
-			const head = parseHead(file);
-			if (!head.sessionId) continue;
-			const status = deriveStatus(file, config.busyWindowMs);
-			const cwd = head.cwd || "";
-			out.push({
-				id: head.sessionId,
-				path: file,
-				title: (head.title || firstUserText(file) || basename(cwd) || "session").slice(0, 64),
-				cwd,
-				timestamp: new Date(head.created || stat.mtimeMs).toISOString(),
-				modified: stat.mtimeMs,
-				size: stat.size,
-				status,
-			});
 		}
 	}
-	out.sort((left, right) => right.modified - left.modified);
-	return out.slice(0, limit);
+	candidates.sort((left, right) => right.modified - left.modified);
+
+	const out = [];
+	for (const candidate of candidates) {
+		if (out.length >= limit) break;
+		const head = parseHead(candidate.file);
+		if (!head.sessionId) continue;
+		const status = deriveStatus(candidate.file, config.busyWindowMs);
+		const cwd = head.cwd || "";
+		out.push({
+			id: head.sessionId,
+			path: candidate.file,
+			title: (head.title || firstUserText(candidate.file) || basename(cwd) || "session").slice(0, 64),
+			cwd,
+			timestamp: new Date(head.created || candidate.modified).toISOString(),
+			modified: candidate.modified,
+			size: candidate.size,
+			status,
+		});
+	}
+	return out;
 }
 
 /**
