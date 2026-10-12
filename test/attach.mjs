@@ -218,6 +218,23 @@ console.log("answer paths");
 		check("unambiguous label match still resolves", unambiguous.answered === true && unambiguous.pane.focus === 0);
 	}
 
+	// A stray framed row must never win regardless of where it sits or how the
+	// option columns shifted, while a real option at a minority marker offset must
+	// survive. The discriminator is the marker GLYPH (stable within a dialog), not
+	// the column (which moves with the focus glyph and the terminal padding).
+	{
+		const mk = rows => ["╭─ Ask ─╮", "│  q  Submit │", "│ Which? │", "├────┤", ...rows, "│  │", "├────┤", "│ toggle · submit · ↑/↓ │", "╰────╯"].join("\n");
+		const strayFirst = mk([`│ \uf2c7 note │`, `│ ${FOCUS} ${MARK} Only │`]);
+		check("stray before the only option does not win", JSON.stringify(readDialogFromPane(strayFirst)?.options.map(o => o.label)) === JSON.stringify(["Only"]), JSON.stringify(readDialogFromPane(strayFirst)?.options.map(o => o.label)));
+		const strayMid = mk([`│ ${FOCUS} ${MARK} A │`, `│ \uf2c7 note │`, `│   ${MARK} B │`]);
+		check("stray between options is dropped, focus intact", JSON.stringify(readDialogFromPane(strayMid)?.options.map(o => o.label)) === JSON.stringify(["A", "B"]), JSON.stringify(readDialogFromPane(strayMid)?.options.map(o => o.label)));
+		const offModal = mk([`│ ${FOCUS} ${MARK} A │`, `│   ${MARK} B │`, `│  ${MARK} C │`, `│   ${MARK} D │`]);
+		check("an option at a minority offset survives", JSON.stringify(readDialogFromPane(offModal)?.options.map(o => o.label)) === JSON.stringify(["A", "B", "C", "D"]), JSON.stringify(readDialogFromPane(offModal)?.options.map(o => o.label)));
+		const checkedPlusStray = mk([`│ ${FOCUS} ${CHECK} A │`, `│   ${MARK} B │`, `│   ${MARK} C │`, `│ \uf2c7 note │`]);
+		const parsed = readDialogFromPane(checkedPlusStray);
+		check("a checked row counts as an option", JSON.stringify(parsed?.options.map(o => o.label)) === JSON.stringify(["A", "B", "C"]) && JSON.stringify(parsed?.checked) === "[0]", JSON.stringify(parsed && { o: parsed.options.map(x => x.label), c: parsed.checked }));
+	}
+
 	// A render whose focused row sits one column off (leading padding is
 	// terminal-width dependent) must still yield a usable dialog: the focused row is
 	// never trimmed, or focusRow stays -1 and the dialog becomes unanswerable.

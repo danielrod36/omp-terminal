@@ -698,31 +698,39 @@ function readAskBoxes(lines) {
 			const row = framed ? splitOptionRow(content) : null;
 			if (row && row.label && isMarker(row.marker)) candidates.push(row);
 		}
-		// Prefer rows at the block's shared marker offset, but never let alignment
-		// decide whether the dialog exists: a render that puts the focused row's
-		// marker one column off (the leading padding is terminal-width dependent)
-		// would otherwise drop the focused row, leave focusRow at -1, and make the
-		// whole live dialog invisible and unanswerable. Alignment is a tiebreaker
-		// only — when no clear majority agrees, every candidate is kept.
-		const offsets = new Map();
-		for (const candidate of candidates) offsets.set(candidate.markerAt, (offsets.get(candidate.markerAt) ?? 0) + 1);
-		let modalAt = -1;
-		let modalCount = 0;
-		for (const [offset, count] of offsets) {
-			if (count > modalCount || (count === modalCount && offset < modalAt)) {
-				modalAt = offset;
-				modalCount = count;
+		// Select the real option rows by MARKER GLYPH, not by alignment.
+		//
+		// Measured across every live capture: within one dialog every option row uses
+		// the same marker glyph (U+F096 or U+F10C — never mixed), while the marker's
+		// column moves with the terminal padding and the focus glyph. An offset-based
+		// rule therefore fails in both directions: it drops a real option whose column
+		// shifted, and it can keep a stray row that merely happens to be indented like
+		// the options. Selecting on the glyph is stable under both.
+		//
+		// The focused row is always kept: it is an option by definition, and dropping it
+		// would leave focusRow at -1 and make the live dialog unanswerable.
+		const glyphVotes = new Map();
+		for (const candidate of candidates) glyphVotes.set(candidate.marker, (glyphVotes.get(candidate.marker) ?? 0) + 1);
+		// Seed the winner with the focused row's glyph: a tie must not hand the dialog
+		// to a stray row that merely came first (`Map` iteration is insertion-ordered).
+		const focusedRow = candidates.find(candidate => candidate.focus);
+		let modalGlyph = focusedRow ? focusedRow.marker : null;
+		let modalGlyphCount = modalGlyph === null ? 0 : glyphVotes.get(modalGlyph) ?? 0;
+		for (const [glyph, count] of glyphVotes) {
+			if (count > modalGlyphCount) {
+				modalGlyph = glyph;
+				modalGlyphCount = count;
 			}
 		}
-		// A row carrying the focus glyph is an option by definition, so it is never
-		// trimmed — trimming it would leave focusRow at -1 and make the dialog
-		// unanswerable, which is precisely the case a terminal-width-dependent padding
-		// produces (the focused row one column off from the rest). Only unfocused rows
-		// are subject to the majority rule, and only when it is clear.
-		const runnerUp = [...offsets.entries()].filter(([offset]) => offset !== modalAt).reduce((max, [, count]) => Math.max(max, count), 0);
-		const trim = modalCount >= 2 && modalCount > runnerUp;
+		// A checked row renders U+F14A where an unchecked one renders U+F096/U+F10C, so
+		// the checked glyph is a variant of the same marker rather than a different one.
+		const CHECKED_GLYPH = "\uf14a";
+		const sameMarker = (glyph, reference) =>
+			glyph === reference || (glyph === CHECKED_GLYPH && reference !== CHECKED_GLYPH);
 		for (const row of candidates) {
-			if (trim && !row.focus && row.markerAt !== modalAt) continue;
+			// Keep the focused row unconditionally, plus any row sharing the block's
+			// marker glyph. A stray row with a different glyph is dropped.
+			if (!row.focus && modalGlyph !== null && !sameMarker(row.marker, modalGlyph)) continue;
 			// The `Other (type your own)` row is the free-text affordance, not one of
 			// the offered options.
 			if (/^Other \(type your own\)$/.test(row.label)) continue;
