@@ -84,9 +84,11 @@ export function linkSessions(left, right) {
 	// order (target first), which is the best available: the entries carry no timestamp, and
 	// no current server path emits into both classes before linking them.
 	//
-	// A cursor minted on the source ring therefore no longer names the same frame. It is
-	// clamped forward rather than silently re-delivering: anything at or below the renumbered
-	// end of the source range is treated as already seen.
+	// A cursor minted on the source ring no longer names the same frame, so the first read
+	// after such a merge can re-deliver already-seen source frames. That is unreachable today
+	// (every emit call site uses a canonical id, so no ring holds frames before it is linked),
+	// and re-delivering is the safe direction for the dark-window contract: a repeat frame is
+	// idempotent for the lens, a skipped one is lost.
 	if (source.messages.length > 0) {
 		const base = target.nextId;
 		const merged = source.messages.map(entry => ({ id: entry.id + base - 1, message: entry.message }));
@@ -262,10 +264,9 @@ export function addClient(sessionId, res, needReplay, lastEventId) {
 
 	const cls = ensureClass(sessionId);
 	const parsedLast = Number(lastEventId);
-	// A cursor past the ring's newest id came from a different (or superseded) ring: clamping
-	// to the newest means "nothing new", instead of replaying the whole ring again.
-	const cursor = Number.isFinite(parsedLast) && parsedLast > 0 ? Math.min(parsedLast, cls.nextId - 1) : null;
-	const replayFrom = cursor ?? (needReplay ? 0 : cls.lastDeliveredId);
+	// A cursor past the ring's newest id is not special-cased: every entry fails `> replayFrom`
+	// and nothing replays, which is already the right answer.
+	const replayFrom = Number.isFinite(parsedLast) && parsedLast > 0 ? parsedLast : needReplay ? 0 : cls.lastDeliveredId;
 	let replayed = 0;
 	let replayStalled = false;
 	for (const entry of cls.messages) {
