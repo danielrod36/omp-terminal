@@ -74,10 +74,13 @@ export function linkSessions(left, right) {
 	const leftClass = ensureClass(left);
 	const rightClass = ensureClass(right);
 	if (leftClass === rightClass) return;
-	// Keep the larger (established) class as the survivor, so the ids that have been around
-	// longest keep their ring. Merging the other way is harmless for the ring, which is
-	// shared either way, but this keeps the survivor stable across repeated links.
-	const [target, source] = leftClass.ids.size >= rightClass.ids.size ? [leftClass, rightClass] : [rightClass, leftClass];
+	// Pick the survivor so the class that already OWNS the frames, and the id it emits under,
+	// is the one that keeps them. Callers link `(aliasId, canonicalId)`, so `right` is the
+	// canonical one and wins a tie — otherwise the first link of an alias pair would move the
+	// emit id onto the alias, and a later `emit` under the canonical would refuse.
+	const leftWins = leftClass.messages.length > rightClass.messages.length ||
+		(leftClass.messages.length === rightClass.messages.length && leftClass.ids.size > rightClass.ids.size);
+	const [target, source] = leftWins ? [leftClass, rightClass] : [rightClass, leftClass];
 	// Both sides can already hold frames (an emit before the link). Keep BOTH histories rather
 	// than dropping one, renumbering the source onto the target's id space so the ids stay
 	// monotonic and unique across the merge. The merged order is each side's own emission
@@ -89,6 +92,9 @@ export function linkSessions(left, right) {
 	// (every emit call site uses a canonical id, so no ring holds frames before it is linked),
 	// and re-delivering is the safe direction for the dark-window contract: a repeat frame is
 	// idempotent for the lens, a skipped one is lost.
+	//
+	// The invariant is enforced below rather than assumed: `emit` refuses to write under an
+	// alias, so a class can only ever hold frames under the id it emits under.
 	if (source.messages.length > 0) {
 		const base = target.nextId;
 		const merged = source.messages.map(entry => ({ id: entry.id + base - 1, message: entry.message }));
@@ -171,6 +177,13 @@ export function dropSession(sessionId) {
 export function emit(sessionId, message) {
 	if (!sessionId) return 0;
 	const cls = ensureClass(sessionId);
+	// A class's ring belongs to the id it emits under. Writing under an alias would leave two
+	// populated rings to reconcile at the next merge, so it is refused loudly instead of
+	// silently duplicating the frame for every other id of the class.
+	if (cls.ids.size > 1 && sessionId !== cls.emitId) {
+		log.warn(`emit under alias ${sessionId} ignored; the class emits under ${cls.emitId}`);
+		return 0;
+	}
 	const data = JSON.stringify(message);
 	const id = cls.nextId++;
 	cls.messages.push({ id, message });
