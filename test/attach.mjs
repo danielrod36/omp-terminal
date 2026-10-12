@@ -283,9 +283,27 @@ console.log("answer paths");
 		check("two checked rows plus an empty one keeps all three", JSON.stringify(readDialogFromPane(twoChecked)?.options.map(o => o.label)) === JSON.stringify(["A", "B", "C"]), JSON.stringify(readDialogFromPane(twoChecked)?.options.map(o => o.label)));
 		const allChecked = mk([`│ ${FOCUS} ${CHECK} A │`, `│   ${CHECK} B │`]);
 		check("a fully checked dialog keeps every row", JSON.stringify(readDialogFromPane(allChecked)?.options.map(o => o.label)) === JSON.stringify(["A", "B"]), JSON.stringify(readDialogFromPane(allChecked)?.options.map(o => o.label)));
-		const singleChecked = mk([`│ ${FOCUS} ${CHECK} A │`, `│   ${MARK} B │`]);
-		const single = readDialogFromPane(singleChecked.replace("toggle · submit", "select"));
-		check("one checked row does not promote a single-select dialog", single?.multi === false, String(single?.multi));
+		// Exercise the `>1 checked` fallback itself: an EMPTY marker that is neither the
+		// square nor the circle leaves glyphMulti null, so only the fallback can decide,
+		// and a single-line header plus a `select`-only hint remove the other signals.
+		// (With a circle marker the glyph short-circuits and this branch is never read —
+		// the check would pass even with the fallback reverted.)
+		const EXOTIC = "\uf2c7";
+		const fallbackPane = [
+			"╭─ Ask ─╮",
+			"│ Which? │",
+			"├──────┤",
+			`│ ${FOCUS} ${CHECK} A │`,
+			`│   ${EXOTIC} B │`,
+			"│  │",
+			"├──────┤",
+			"│ select · ↑/↓ │",
+			"╰──────╯",
+		].join("\n");
+		const fallback = readDialogFromPane(fallbackPane);
+		check("one checked row does not promote via the fallback", fallback?.multi === false, String(fallback?.multi));
+		const twoCheckedPane = fallbackPane.replace(`│   ${EXOTIC} B │`, `│   ${CHECK} B │`);
+		check("two checked rows do promote via the fallback", readDialogFromPane(twoCheckedPane)?.multi === true, String(readDialogFromPane(twoCheckedPane)?.multi));
 	}
 
 	// A render whose focused row sits one column off (leading padding is

@@ -707,7 +707,11 @@ function readAskBoxes(lines) {
 			// Between the rules: the option rows. The row keeps its leading
 			// whitespace because the focus column is whitespace-delimited.
 			const row = framed ? splitOptionRow(content) : null;
-			if (row && row.label && isMarker(row.marker)) candidates.push(row);
+			// Every private-use-marker row inside the option block is a candidate; the vote
+			// below decides which glyph is the dialog's marker. Admitting them all here (and
+			// filtering there) is what lets an alternate font's glyph win when the whole
+			// dialog uses it, while a stray still cannot outvote known option markers.
+			if (row && row.label && isMarker(row.marker)) candidates.push({ ...row, known: MARKER_GLYPHS.has(row.marker) });
 		}
 		// Select the real option rows by MARKER GLYPH, not by alignment.
 		//
@@ -726,22 +730,22 @@ function readAskBoxes(lines) {
 		// whenever the wearer's cursor sits on it — so seeding the tie with the focused
 		// row's glyph would make a checked box the block's marker and trim every
 		// unchecked sibling that shares the dialog's real (empty) glyph.
+		// Vote over the KNOWN empty markers only. Restricting the vote this way is what
+		// keeps a stray row (or several) carrying some other private-use glyph from
+		// outvoting the real option rows and shifting focusRow — and with it every
+		// dictated index. When no known glyph appears at all the dialog uses an
+		// alternate icon set, so the focused row's glyph becomes the marker.
 		const emptyVotes = new Map();
-		let checkedCount = 0;
 		for (const candidate of candidates) {
-			if (candidate.marker === CHECKED_GLYPH) {
-				checkedCount++;
-				continue;
-			}
+			if (!candidate.known || candidate.marker === CHECKED_GLYPH) continue;
 			emptyVotes.set(candidate.marker, (emptyVotes.get(candidate.marker) ?? 0) + 1);
 		}
-		// Seed with the focused row's EMPTY glyph: on a tie the dialog must not be handed
-		// to a stray row that merely came first (`Map` iteration is insertion-ordered),
-		// and the focused row's checked marker is not a candidate for the empty glyph.
+		const focusedRow = candidates.find(candidate => candidate.focus);
 		let modalGlyph = null;
 		let modalGlyphCount = 0;
-		const focusedRow = candidates.find(candidate => candidate.focus);
-		if (focusedRow && focusedRow.marker !== CHECKED_GLYPH) {
+		if (focusedRow && focusedRow.known && focusedRow.marker !== CHECKED_GLYPH) {
+			// Seed with the focused row's glyph: a tie must not go to a stray that merely
+			// came first (`Map` iteration is insertion-ordered).
 			modalGlyph = focusedRow.marker;
 			modalGlyphCount = emptyVotes.get(modalGlyph) ?? 0;
 		}
@@ -751,10 +755,14 @@ function readAskBoxes(lines) {
 				modalGlyphCount = count;
 			}
 		}
-		// No empty marker anywhere (every row is checked): fall back to the dialog's
-		// shape from the header rather than leaving the block without a marker.
-		if (modalGlyph === null && candidates.length > 0) modalGlyph = candidates[0].marker === CHECKED_GLYPH ? null : candidates[0].marker;
-		void checkedCount;
+		// No known marker anywhere: an alternate font. Use the focused row's glyph so the
+		// dialog stays answerable, and keep its siblings (compared by glyph below).
+		if (modalGlyph === null && focusedRow && focusedRow.marker !== CHECKED_GLYPH) {
+			modalGlyph = focusedRow.marker;
+		}
+		// `modalGlyph` stays null when every row is checked (no empty marker exists). That
+		// is deliberate: the mode then comes from the header or hint fallbacks, and the
+		// selection rule below keeps every candidate anyway.
 		// A checked row renders U+F14A where an unchecked one renders U+F096/U+F10C, so
 		// the checked glyph is a variant of the same marker rather than a different one.
 		const sameMarker = (glyph, reference) =>
@@ -762,7 +770,9 @@ function readAskBoxes(lines) {
 		box.markerGlyph = modalGlyph;
 		for (const row of candidates) {
 			// Keep the focused row unconditionally, plus any row sharing the block's
-			// marker glyph. A stray row with a different glyph is dropped.
+			// marker glyph. A row with a different glyph is dropped — either a stray, or a
+			// real row in a font build whose marker differs from the block's, which the
+			// vote above already decided against.
 			if (!row.focus && modalGlyph !== null && !sameMarker(row.marker, modalGlyph)) continue;
 			// The `Other (type your own)` row is the free-text affordance, not one of
 			// the offered options.
