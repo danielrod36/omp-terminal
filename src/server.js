@@ -311,6 +311,23 @@ export function createBridge(config) {
 	 * steered in place (the desk agent owns the process). Anything else gets an
 	 * owned `omp --mode rpc-ui` child, resuming the transcript when one exists.
 	 */
+	/**
+	 * Resolve an id to a session WITHOUT starting anything.
+	 *
+	 * For answering a dialog this is the only correct lookup: a dialog can exist solely on a
+	 * session the bridge is already driving, so a fresh owned child could never satisfy the
+	 * request. `resolveTarget` would spawn one for any id that names no live session and no
+	 * listed pane — so a stale or mistyped id (exactly what a client retries after a child
+	 * crashed) left an idle `omp` process registered for the bridge's lifetime.
+	 */
+	async function resolveAnswerable(sessionId) {
+		const live = dropIfDead(getLive(sessionId));
+		if (live) return live;
+		if (!config.attach) return null;
+		const attached = await findAttachEntry(sessionId);
+		return attached ? ensureAttached(attached) : null;
+	}
+
 	async function resolveTarget(sessionId, { cwd } = {}) {
 		const live = dropIfDead(getLive(sessionId));
 		if (live) return live;
@@ -563,8 +580,9 @@ export function createBridge(config) {
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
 			// Adopt on demand: /api/sessions lists every desk pane the scan finds, but only an adopted
 			// session is in `sessions`. Without this a client answering from a freshly listed id got
-			// 404 "Session not found" for a session it had just been told about.
-			const session = await resolveTarget(sessionId).catch(() => dropIfDead(getLive(sessionId)));
+			// 404 "Session not found" for a session it had just been told about. Adopting must not
+			// SPAWN, though — see resolveAnswerable.
+			const session = await resolveAnswerable(sessionId).catch(() => dropIfDead(getLive(sessionId)));
 			if (!session) return sendJson(res, 404, { error: "Session not found" });
 			// The refusal reason travels to the client: "nothing is pending" and "the card was not
 			// understood" are different situations, and only the first one means "do nothing".
@@ -578,7 +596,7 @@ export function createBridge(config) {
 			const { sessionId, answer } = body;
 			log.info(`question-response raw=${JSON.stringify(answer)?.slice(0, 200)} (sessionId=${sessionId ?? "-"})`);
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
-			const session = await resolveTarget(sessionId).catch(() => dropIfDead(getLive(sessionId)));
+			const session = await resolveAnswerable(sessionId).catch(() => dropIfDead(getLive(sessionId)));
 			if (!session) return sendJson(res, 404, { error: "Session not found" });
 			const accepted = await session.answerQuestion(answer ?? "skip");
 			if (!accepted) return sendJson(res, 409, { error: "the question could not be answered from this card" });

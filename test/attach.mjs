@@ -180,6 +180,22 @@ console.log("pane scraping");
 			JSON.stringify(lb?.options.map(o => o.label)) === JSON.stringify(["Approve", "Deny"]) && lb?.focusedIndex === 0,
 			JSON.stringify(lb?.options.map(o => o.label)) + " focus=" + lb?.focusedIndex);
 
+		// A body `Yes` that TOUCHES the menu joins it into `Yes, Approve, Deny`. Reading canonicalness
+		// off the run's ends then calls the real menu non-canonical, and it loses to a bare body run.
+		const strayTouching = card([
+			"│ Yes                                                                          │",
+			"│ No                                                                           │",
+			"│                                                                              │",
+			"│ Yes                                                                          │",
+			"│  \uf054 Approve                                                                   │",
+			"│    Deny                                                                      │",
+			"│ ↑/↓ navigate  󰌑 select  󱊷 cancel                                             │",
+		]);
+		const st = readDialogFromPane(strayTouching);
+		check("a stray choice word touching the menu does not hide it",
+			JSON.stringify(st?.options.map(o => o.label)) === JSON.stringify(["Approve", "Deny"]) && st?.focusedIndex === 0,
+			JSON.stringify(st?.options.map(o => o.label)) + " focus=" + st?.focusedIndex);
+
 		// An unfocused lone row must not fabricate focus 0: a dictated deny would then submit it.
 		const lone = card(["│ Approve                                                                    │", "│ ↑/↓ navigate  󰌑 select  󱊷 cancel                                             │"]);
 		const lo = readDialogFromPane(lone);
@@ -399,6 +415,46 @@ console.log("answer paths");
 		check("a permission pair with no focused row is refused, with a reason",
 			noFocus.ok === false && /selected/.test(noFocus.reason) && keys.length === 0,
 			JSON.stringify({ noFocus, keys }));
+
+		// The app names a question answer three ways and cannot know whether the session is owned
+		// or attached, so both must accept the same three. A keyed object used to stringify to
+		// "[object Object]", match no option, and drop the wearer's answer.
+		// Copied from the live `Ask` dialog in /tmp/realpane.txt: a bare `Ask` header, the question,
+		// then option rows that carry a leading bar but no trailing one. The border shapes matter —
+		// a hand-drawn box with trailing bars does not parse at all, so a fixture that "looks like"
+		// a card can test nothing.
+		// The option rows carry a leading bar only — the label runs to the end of the line, with no
+		// closing bar. Adding one makes the label itself contain `│` and it matches no option, which
+		// is how a fixture that looks like a card tests nothing.
+		const questionPane = [
+			"╭─ Ask ─╮",
+			"│  colours    Submit",
+			"│ Which colour do you prefer?",
+			"├────────",
+			"│    Red",
+			"│     Green",
+			"│     Blue",
+			"│",
+			"├────────",
+			"│   select · 󰌑 submit · ↑/↓ move",
+			"╰────────",
+		].join("\n");
+		for (const [shape, answer, want] of [
+			["a bare label", "Green", true],
+			// Keyed by the question text exactly as the pane renders it — the same key the app reads
+			// off the `user_question` frame it was sent.
+			["an object keyed by the question", { "Which colour do you prefer?": "Green" }, true],
+			["an object keyed by index", { 0: "Green" }, true],
+			["a label no row carries", "Purple", false],
+		]) {
+			session.capture = async () => questionPane;
+			keys = [];
+			const got = await session.answerQuestion(answer);
+			const ok = Boolean(got?.ok ?? got) === want;
+			check(`a question answer as ${shape} is ${want ? "accepted" : "refused"}`,
+				ok && (want ? keys.length > 0 : keys.length === 0),
+				JSON.stringify({ got, keys }));
+		}
 
 		// The hint bar is a precondition, not decoration: a card caught mid-repaint can show the
 		// rows before the bar paints, and answering it would submit a row the wearer has not

@@ -539,9 +539,16 @@ export class AttachSession {
 		const pane = await this.capture();
 		const dialog = readDialogFromPane(pane);
 		if (!dialog || dialog.kind !== "question") return false;
+		// The app may name the answer three ways, and it cannot know whether this session is
+		// owned or attached, so both must accept the same shapes. A keyed object maps the
+		// question to its answer (`{"Which colour?": "Blue"}`) — the shape `parseQuestionAnswer`
+		// already handles for an owned session. Stringifying it first produced "[object Object]",
+		// which matched no option, so the wearer's answer was silently dropped.
+		const keyed = rawAnswer && typeof rawAnswer === "object" && !Array.isArray(rawAnswer) ? rawAnswer : null;
+		const value = keyed ? (keyed[dialog.prompt] ?? keyed[String(0)]) : rawAnswer;
 		// A dictated answer names an option by label ("Blue") or by number
 		// ("two" → 2), relative to the option rows as rendered.
-		const text = String(rawAnswer ?? "").trim();
+		const text = String(value ?? "").trim();
 		const options = dialog.options ?? [];
 		const wanted = resolveRequestedIndex(text, options);
 		if (wanted < 0) return false;
@@ -691,10 +698,16 @@ export function readDialogFromPane(pane) {
 			// length-only score, and the card is then announced as the body pair with focus -1,
 			// unanswerable. Position only breaks a full tie (same rank, same length), where the
 			// BOTTOM-most run wins because the menu sits at the end of the card.
-			const first = CHOICE_ROW.exec(body[index])[2];
-			const last = CHOICE_ROW.exec(body[end])[2];
-			const canonical = (first === "Approve" && last === "Deny") || (first === "Yes" && last === "No");
-			const rank = canonical ? 1 : 0;
+			// Canonical means the run CONTAINS an adjacent Approve/Deny pair, not merely that it
+			// starts and ends with those words. Testing only the ends let a body `Yes` that happened
+			// to touch the menu join the real pair into a three-row run — `Yes, Approve, Deny` — which
+			// then read as non-canonical, lost to a bare `Yes`/`No` body run above it, and the card was
+			// announced with the body's words and focus -1 (unanswerable).
+			const labels = [];
+			for (let row = index; row <= end; row++) labels.push(CHOICE_ROW.exec(body[row])[2]);
+			const hasApproval = labels.some((label, at) => label === "Approve" && labels[at + 1] === "Deny");
+			const endsYesNo = labels[0] === "Yes" && labels[labels.length - 1] === "No";
+			const rank = hasApproval ? 2 : endsYesNo ? 1 : 0;
 			const score = rank * 1000 + (end - index + 1);
 			if (score >= best) {
 				best = score;
