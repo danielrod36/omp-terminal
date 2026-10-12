@@ -161,6 +161,25 @@ console.log("pane scraping");
 			JSON.stringify(bp?.options.map(o => o.label)) === JSON.stringify(["Approve", "Deny"]) && bp?.focusedIndex === 0,
 			JSON.stringify(bp?.options.map(o => o.label)) + " focus=" + bp?.focusedIndex);
 
+		// Rank must beat LENGTH, not merely position: a body run of three rows (No,Yes,No) sitting
+		// above the two-row menu wins on length alone, and the scan then announces the body pair
+		// with focus -1 — unanswerable, so every dictated answer is refused. The pair-order fixture
+		// above cannot catch this, because a single contiguous run is resolved by the pair rule
+		// regardless of how it was ranked.
+		const longerBodyRun = card([
+			"│ No                                                                           │",
+			"│ Yes                                                                          │",
+			"│ No                                                                           │",
+			"│                                                                              │",
+			"│  \uf054 Approve                                                                   │",
+			"│    Deny                                                                      │",
+			"│ ↑/↓ navigate  󰌑 select  󱊷 cancel                                             │",
+		]);
+		const lb = readDialogFromPane(longerBodyRun);
+		check("a longer non-canonical body run does not outrank the menu",
+			JSON.stringify(lb?.options.map(o => o.label)) === JSON.stringify(["Approve", "Deny"]) && lb?.focusedIndex === 0,
+			JSON.stringify(lb?.options.map(o => o.label)) + " focus=" + lb?.focusedIndex);
+
 		// An unfocused lone row must not fabricate focus 0: a dictated deny would then submit it.
 		const lone = card(["│ Approve                                                                    │", "│ ↑/↓ navigate  󰌑 select  󱊷 cancel                                             │"]);
 		const lo = readDialogFromPane(lone);

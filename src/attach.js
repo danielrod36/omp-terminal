@@ -683,10 +683,11 @@ export function readDialogFromPane(pane) {
 			while (end + 1 < body.length && CHOICE_ROW.exec(body[end + 1])) end++;
 			// Rank runs by vocabulary, then by length, then by position. `Approve`/`Deny` IS the
 			// permission menu's own vocabulary while `Yes`/`No` is what a body line looks like, so a
-			// canonical run wins even when a body pair is longer or sits higher. Position only breaks
-			// a full tie (same rank, same length), where the BOTTOM-most run wins because the menu
-			// sits at the end of the card — taking the topmost there let an adjacent body `Yes`/`No`
-			// pair beat the real menu and leave the card unanswerable (focus -1 → refuse).
+			// canonical run wins even when a body pair is longer or sits higher — measured: a
+			// three-row `No`/`Yes`/`No` body run above the menu wins on length alone under a
+			// length-only score, and the card is then announced as the body pair with focus -1,
+			// unanswerable. Position only breaks a full tie (same rank, same length), where the
+			// BOTTOM-most run wins because the menu sits at the end of the card.
 			const first = CHOICE_ROW.exec(body[index])[2];
 			const last = CHOICE_ROW.exec(body[end])[2];
 			const canonical = (first === "Approve" && last === "Deny") || (first === "Yes" && last === "No");
