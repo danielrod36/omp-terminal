@@ -16,6 +16,11 @@ const HEARTBEAT_MS = 15_000;
  * normal frame burst and below anything that threatens the process.
  */
 const MAX_CLIENT_BUFFER_BYTES = 4 * 1024 * 1024;
+/**
+ * Most ids one equivalence class may hold. Every member costs a ring push and a frame write
+ * per emit, so the class is capped rather than allowed to grow with a caller's invented ids.
+ */
+const MAX_IDS_PER_CLASS = 32;
 
 /**
  * Marker for the teardown attached to each attached response, so any path that removes a
@@ -57,6 +62,16 @@ export function linkSessions(left, right) {
 	const classLeft = idClass(left);
 	const classRight = idClass(right);
 	if (classLeft === classRight) return;
+	// A class exists only to bridge the id a client already holds to the canonical one, so
+	// its useful size is bounded by the number of distinct ids a client could be holding.
+	// An unbounded class is not merely memory: `emit` writes one frame per member, so a
+	// caller rotating prefix ids made every frame cost O(ids) — measured 229x for 1000
+	// aliases. Refusing to grow past the cap is safe because the caller's next prompt
+	// re-resolves the id through the store and re-links it.
+	if (classLeft.size + classRight.size > MAX_IDS_PER_CLASS) {
+		log.warn(`refusing to link ${right} into a class of ${classLeft.size} ids (cap ${MAX_IDS_PER_CLASS})`);
+		return;
+	}
 	for (const id of classRight) {
 		classLeft.add(id);
 		idLinks.set(id, classLeft);
