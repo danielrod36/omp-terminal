@@ -113,18 +113,29 @@ export function createBridge(config) {
 		return session.paneGone === true;
 	}
 
+	/**
+	 * Forget aliases whose canonical session is gone for good.
+	 *
+	 * Adoption adds one alias per session lifecycle, and without this the map grows for the
+	 * life of the process — the same per-conversation retention the ring eviction prevents.
+	 * The sweep is deliberately deferred to here rather than run on drop: at drop time the
+	 * replacement that re-adopts these ids has not been created yet, and removing them then
+	 * left callers' own ids unresolvable.
+	 */
+	function pruneAliases() {
+		for (const [alias, canonical] of sessionAliases) {
+			if (!sessions.has(canonical)) sessionAliases.delete(alias);
+		}
+	}
+
 	function dropIfDead(session) {
 		if (!session || !isDead(session)) return session;
 		sessions.delete(session.id);
 		if (session.tmuxSession) attachRegistry.delete(session.tmuxSession);
 		// Aliases that named this id survive the drop: a replacement takes the same
 		// canonical id, and a client still holding its original id must keep resolving to it
-		// rather than 404ing until something happens to re-scan the store. `getLive` returns
-		// null for a dangling alias, so leaving one is harmless.
-		
-		// The SSE ring is keyed by session id and is not this map's to free, but a dead
-		// session's ring is now unreachable: without this, one ring per conversation ever
-		// started is retained for the life of the process.
+		// rather than 404ing until something happens to re-scan the store.
+		//
 		dropSession(session.id);
 		return null;
 	}
@@ -269,6 +280,11 @@ export function createBridge(config) {
 			}
 			sessions.set(session.id, session);
 			if (clientId && clientId !== session.id) sessions.delete(clientId);
+			// Sweep only now that a session is stored: an alias may name an id whose
+			// replacement has just taken it up, and removing it before that would leave the
+			// caller's own id unresolvable (the 404 this replace exists to avoid). An alias
+			// whose target is still missing resolves to nothing anyway, so dropping it is inert.
+			pruneAliases();
 			log.info(`owned session ${session.id} started (cwd=${session.cwd} resume=${found ?? "none"})`);
 			return session;
 		})();
