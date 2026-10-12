@@ -730,37 +730,46 @@ function readAskBoxes(lines) {
 		// whenever the wearer's cursor sits on it — so seeding the tie with the focused
 		// row's glyph would make a checked box the block's marker and trim every
 		// unchecked sibling that shares the dialog's real (empty) glyph.
-		// Vote over the KNOWN empty markers only. Restricting the vote this way is what
-		// keeps a stray row (or several) carrying some other private-use glyph from
-		// outvoting the real option rows and shifting focusRow — and with it every
-		// dictated index. When no known glyph appears at all the dialog uses an
-		// alternate icon set, so the focused row's glyph becomes the marker.
-		const emptyVotes = new Map();
-		for (const candidate of candidates) {
-			if (!candidate.known || candidate.marker === CHECKED_GLYPH) continue;
-			emptyVotes.set(candidate.marker, (emptyVotes.get(candidate.marker) ?? 0) + 1);
-		}
+		// Whether the block renders ANY known marker decides which glyphs may vote. When it
+		// does the font is one we know, and every other private-use glyph is a stray that
+		// must not be able to outvote the real rows (that would drop them and shift
+		// focusRow, and with it every dictated index). When it does not, the dialog uses an
+		// alternate icon set and there is no known glyph to compare against, so the vote
+		// runs over whatever markers it renders.
+		const knownFont = candidates.some(candidate => candidate.known);
 		const focusedRow = candidates.find(candidate => candidate.focus);
+		// Count the EMPTY markers carried by the rows OTHER than the focused one. The
+		// focused row is deliberately excluded: it is kept unconditionally below, so it
+		// cannot be a stray, and letting its glyph vote would make a checked focused row
+		// (whose glyph is not the block's empty one) the marker and trim its siblings.
+		const siblingVotes = new Map();
+		for (const candidate of candidates) {
+			if (candidate.focus || candidate.marker === CHECKED_GLYPH) continue;
+			if (knownFont && !candidate.known) continue;
+			siblingVotes.set(candidate.marker, (siblingVotes.get(candidate.marker) ?? 0) + 1);
+		}
+		// The marker is a constant function of the dialog's mode, so a glyph shared by the
+		// siblings is evidence of it — but only a STRICT lead is. On a tie nothing
+		// distinguishes a stray from a sibling, and `Map` iteration order must not decide.
 		let modalGlyph = null;
 		let modalGlyphCount = 0;
-		if (focusedRow && focusedRow.known && focusedRow.marker !== CHECKED_GLYPH) {
-			// Seed with the focused row's glyph: a tie must not go to a stray that merely
-			// came first (`Map` iteration is insertion-ordered).
-			modalGlyph = focusedRow.marker;
-			modalGlyphCount = emptyVotes.get(modalGlyph) ?? 0;
-		}
-		for (const [glyph, count] of emptyVotes) {
+		let tied = false;
+		for (const [glyph, count] of siblingVotes) {
 			if (count > modalGlyphCount) {
 				modalGlyph = glyph;
 				modalGlyphCount = count;
+				tied = false;
+			} else if (count === modalGlyphCount) {
+				tied = true;
 			}
 		}
-		// Whether the block renders ANY known marker decides how the rows below are
-		// filtered. When it does, the font is one we know and every other private-use
-		// glyph is a stray. When it does not, the dialog uses an alternate icon set: no
-		// known glyph exists to compare against, so its rows cannot be told from a stray
-		// and all of them are kept.
-		const knownFont = candidates.some(candidate => candidate.known);
+		if (tied) modalGlyph = null;
+		// No sibling evidence (every sibling checked, or a tie): fall back to the focused
+		// row's own glyph so the dialog stays answerable at all. A focused CHECKED glyph is
+		// not the block's empty marker, so it does not qualify.
+		if (modalGlyph === null && focusedRow && focusedRow.marker !== CHECKED_GLYPH && (!knownFont || focusedRow.known)) {
+			modalGlyph = focusedRow.marker;
+		}
 		// `modalGlyph` stays null when a known font checks every row (no empty marker
 		// exists): the mode then comes from the header or hint fallbacks, and the checks
 		// below keep each known row on its own merits.
@@ -768,14 +777,17 @@ function readAskBoxes(lines) {
 		// the checked glyph is a variant of the same marker rather than a different one.
 		const sameMarker = (glyph, reference) =>
 			glyph === reference || (glyph === CHECKED_GLYPH && reference !== CHECKED_GLYPH);
+		// Only a known font lets the mode be read from the glyph; an alternate icon set's
+		// marker is unknown to us, so the mode comes from the header or hint fallbacks.
 		box.markerGlyph = knownFont ? modalGlyph : null;
 		for (const row of candidates) {
-			// Keep the focused row unconditionally (it is an option by definition), and in
-			// an alternate icon set every other candidate too. In a known font a row is kept
-			// only when its glyph belongs to the block's marker family: a different or
-			// unknown glyph marks a stray, whose presence would shift focusRow and with it
-			// every dictated index.
-			if (!row.focus && knownFont && (!row.known || (modalGlyph !== null && !sameMarker(row.marker, modalGlyph)))) continue;
+			// Keep the focused row unconditionally: it is an option by definition, and
+			// dropping it would leave focusRow at -1 and the dialog unanswerable. Every other
+			// row is kept only when it belongs to the block's marker family — an unknown glyph
+			// in a known font, or a differing glyph anywhere, marks a stray whose presence
+			// would inflate the option list and shift every dictated index.
+			if (!row.focus && knownFont && !row.known) continue;
+			if (!row.focus && modalGlyph !== null && !sameMarker(row.marker, modalGlyph)) continue;
 			// The `Other (type your own)` row is the free-text affordance, not one of
 			// the offered options.
 			if (/^Other \(type your own\)$/.test(row.label)) continue;

@@ -256,6 +256,19 @@ console.log("answer paths");
 		check("alternate font with a checked focused row keeps its siblings", JSON.stringify(alt?.options.map(o => o.label)) === JSON.stringify(["A", "B"]), JSON.stringify(alt?.options.map(o => o.label)));
 	}
 
+	// An alternate icon set must still drop a stray: with the focused row EMPTY, the
+	// siblings carry the block's own marker and a third row carrying a different glyph
+	// is a stray. Keeping it would inflate focusRow and make Enter land past the
+	// dictated option.
+	{
+		const X = "\uf2c7";
+		const Y = "\uf2c8";
+		const box = rows => ["╭─ Ask ─╮", "│ Which? │", "├────┤", ...rows, "│  │", "├────┤", "│ select · ↑/↓ │", "╰────╯"].join("\n");
+		const strayed = box([`│ ${FOCUS} ${X} A │`, `│   ${X} B │`, `│ ${Y} note │`]);
+		const kept = readDialogFromPane(strayed);
+		check("an alternate font still drops a stray", JSON.stringify(kept?.options.map(o => o.label)) === JSON.stringify(["A", "B"]), JSON.stringify(kept?.options.map(o => o.label)));
+	}
+
 	// The same stray in a KNOWN font: every row checked leaves no marker to compare
 	// against, but the font is known, so an exotic row is still a stray and must not
 	// inflate the option list — focusRow and the Down-press arithmetic depend on it.
