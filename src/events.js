@@ -28,6 +28,11 @@ const MAX_CLIENT_BUFFER_BYTES = 4 * 1024 * 1024;
  * ring, so this only bounds the lookup itself; frames are written once per client.
  */
 const MAX_IDS_PER_CLASS = 256;
+/**
+ * Most ids whose frames a class may hold, and therefore protect from the lookup cap. Small
+ * on purpose: it bounds the map while still covering a merge of two rings that both emitted.
+ */
+const MAX_RING_OWNERS = 4;
 
 /**
  * Marker for the teardown attached to each attached response, so any path that removes a
@@ -56,7 +61,7 @@ function ensureClass(id) {
 	touchId(id);
 	let cls = sessions.get(id);
 	if (!cls) {
-		cls = { ids: new Set([id]), emitId: id, ringOwners: new Set(), firstEmit: null, firstEmitWarned: false, messages: [], clients: new Set(), nextId: 1, lastDeliveredId: 0 };
+		cls = { ids: new Set([id]), emitId: id, owners: [], firstEmit: null, firstEmitWarned: false, messages: [], clients: new Set(), nextId: 1, lastDeliveredId: 0 };
 		sessions.set(id, cls);
 	}
 	return cls;
@@ -106,15 +111,17 @@ export function linkSessions(left, right) {
 		target.ids.add(id);
 		sessions.set(id, target);
 	}
-	// Union the ids that have actually EMITTED, on either side. `emit` records the id it writes
-	// under, so this is exactly those ids. Only they can strand the ring — forgetting one would
-	// let a later emit under it mint a fresh class, dividing the frames and clients that just
-	// moved here. An id that merely had a class of its own is not protected: every linked id was
-	// once one, and protecting them all would defeat the cap.
-	const owners = new Set(target.ringOwners);
-	for (const id of source.ringOwners) owners.add(id);
-	if (owners.size === 0) owners.add(target.emitId); // nothing has emitted yet: keep the class id
-	target.ringOwners = owners;
+	// Carry over the ids whose frames this ring holds, on either side, up to a small bound. They
+	// must stay reachable or a later emit under one mints a fresh class and loses the frames it
+	// owns. The bound is what keeps the cap enforceable: an unbounded list let every emitting id
+	// resist forgetting (measured: 500 ids all retained), while a single entry is not enough
+	// because a merge can bring frames from two ids. Only ids that actually emitted qualify —
+	// every linked id once had a class of its own, and protecting those would defeat the cap.
+	for (const id of source.owners) {
+		if (target.owners.length < MAX_RING_OWNERS) target.owners.push(id);
+	}
+	if (target.firstEmit && !target.owners.includes(target.firstEmit)) target.owners.push(target.firstEmit);
+	if (target.owners.length === 0) target.owners.push(target.emitId);
 	// Move the clients too. Leaving them on `source` strands them: that object is no longer
 	// reachable from any id, so `emit` never fans to it, the backpressure sweep cannot see
 	// it, and `totalClients` undercounts — a client subscribed under a merged-away id would
@@ -136,14 +143,12 @@ export function linkSessions(left, right) {
 		for (const id of byUse) {
 			if (forgotten >= excess) break;
 			if (protectedIds.has(id)) continue;
-			// Never forget an id that owns this ring: any id that has emitted on either side of a
-			// merge, plus the ids the classes were created under. Protecting a single id would be
-			// wrong after a both-emitted merge, and protecting only the two linked ids would rely
-			// on callers passing the canonical as one of them.
-			if ((target.ringOwners ?? new Set()).has(id)) continue;
 			// An id a client is subscribed under keeps its name: its stream and its polls both
 			// use it, and `getMessages` has no other way to find the class.
 			if ((idSubscribers.get(id) ?? 0) > 0) continue;
+			// An id whose frames this ring holds stays reachable, so a later emit under it lands
+			// here rather than in a fresh class.
+			if (target.owners.includes(id)) continue;
 			if (!target.ids.has(id)) continue;
 			target.ids.delete(id);
 			sessions.delete(id);
@@ -187,11 +192,12 @@ export function emit(sessionId, message) {
 	// silence every subscriber, and `0` is the "no session id" sentinel. The first emit under a
 	// brand-new class fixes the id that ring belongs to, which is the session's canonical id on
 	// every current path (the ring only receives frames after adoption).
-	cls.ringOwners.add(sessionId);
 	if (cls.firstEmit === null) {
 		// Remember which id first wrote to this class. Frames land in the class's one ring
-		// regardless, so this changes no behaviour.
+		// regardless, so this changes no behaviour — but it also names the id whose frames the
+		// ring holds, which the trim protects.
 		cls.firstEmit = sessionId;
+		if (cls.owners.length < MAX_RING_OWNERS) cls.owners.push(sessionId);
 	} else if (cls.firstEmit !== sessionId && cls.ids.size > 1 && !cls.firstEmitWarned) {
 		// Diagnostic only, and a narrow one: it reports an emit id that changed over time, as a
 		// caller id would if some future path emitted before adoption. It cannot see a swapped
