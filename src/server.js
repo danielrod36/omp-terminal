@@ -606,7 +606,10 @@ export function createBridge(config) {
 		if (req.method === "POST" && path === "/api/interrupt") {
 			const { sessionId } = (await readJson(req)) ?? {};
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
-			const session = dropIfDead(getLive(sessionId));
+			// Adopt a listed desk pane, but never spawn: interrupting is about a session already
+			// running, and a freshly spawned child would have nothing to abort. Without the adopt,
+			// an id straight out of /api/sessions 404'd here while the dialog routes accepted it.
+			const session = (await resolveAnswerable(sessionId).catch(() => dropIfDead(getLive(sessionId)))) ?? dropIfDead(getLive(sessionId));
 			if (!session) return sendJson(res, 404, { error: "Session not found" });
 			try {
 				await session.interrupt();
