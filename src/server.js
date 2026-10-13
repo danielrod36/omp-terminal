@@ -1,16 +1,20 @@
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 import { URL } from "node:url";
 import { createLogger, redactToken } from "./log.js";
-import { addClient, getMessages, historyFromRing, linkSessions, totalClients } from "./events.js";
+import { addClient, dropSession, getMessages, historyFromRing, linkSessions, totalClients } from "./events.js";
 import { OwnedSession, parseQuestionAnswer } from "./provider.js";
 import { AttachSession, listTmuxOmpSessions } from "./attach.js";
 import { findOmpSession, listOmpSessions, ompHistory } from "./sessions.js";
 
 const log = createLogger("http");
 const run = promisify(execFile);
+const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const pkgName = pkg.name;
+const pkgVersion = pkg.version;
 
 const JSON_HEADERS = { "Content-Type": "application/json; charset=utf-8" };
 
@@ -25,13 +29,25 @@ async function readJson(req) {
 	let total = 0;
 	for await (const chunk of req) {
 		total += chunk.length;
-		if (total > 10 * 1024 * 1024) throw new Error("request body too large");
+		if (total > 10 * 1024 * 1024) {
+			const error = new Error("request body too large");
+			error.statusCode = 413;
+			throw error;
+		}
 		chunks.push(chunk);
 	}
 	if (chunks.length === 0) return {};
 	const text = Buffer.concat(chunks).toString("utf8").trim();
 	if (!text) return {};
-	return JSON.parse(text);
+	try {
+		return JSON.parse(text);
+	} catch (error) {
+		// A malformed body is the client's mistake: mapping it to 500 would both
+		// misreport the fault and log a client error at error level.
+		const wrapped = new Error(`invalid JSON body: ${error.message}`);
+		wrapped.statusCode = 400;
+		throw wrapped;
+	}
 }
 
 /**
@@ -46,16 +62,30 @@ export function createBridge(config) {
 
 	/** `omp --version`, resolved once and cached for /api/info. */
 	let ompVersion;
-	async function resolveOmpVersion() {
-		if (ompVersion !== undefined) return ompVersion;
-		try {
-			const { stdout } = await run(config.ompCommand, ["--version"], { timeout: 5000 });
-			ompVersion = stdout.trim().replace(/^omp\//, "") || null;
-		} catch (error) {
-			log.warn(`could not resolve omp version: ${error.message}`);
-			ompVersion = null;
+	/** The in-flight probe, so concurrent callers share one child instead of one each. */
+	let ompVersionProbe;
+	function resolveOmpVersion() {
+		if (ompVersion !== undefined) return Promise.resolve(ompVersion);
+		// Cache the PROMISE, not the result: assigning only after the await let every
+		// concurrent /api/info spawn its own `omp --version` (measured: 30 requests, 30
+		// children), which any token holder could repeat to exhaust the process table.
+		if (!ompVersionProbe) {
+			ompVersionProbe = (async () => {
+				try {
+					const { stdout } = await run(config.ompCommand, ["--version"], { timeout: 5000 });
+					ompVersion = stdout.trim().replace(/^omp\//, "") || null;
+				} catch (error) {
+					// A probe that failed because omp was momentarily unavailable must not
+					// pin "unknown" for the process lifetime, so only a success is cached
+					// past this call.
+					log.warn(`could not resolve omp version: ${error.message}`);
+					ompVersionProbe = undefined;
+					return null;
+				}
+				return ompVersion;
+			})();
 		}
-		return ompVersion;
+		return ompVersionProbe;
 	}
 
 	function authorized(req) {
@@ -77,6 +107,39 @@ export function createBridge(config) {
 		return canonical ? sessions.get(canonical) ?? null : null;
 	}
 
+	/** A session whose child exited is dead weight: drop it so a re-prompt respawns. */
+	function isDead(session) {
+		if (session instanceof OwnedSession) return session.rpc?.closed === true;
+		return session.paneGone === true;
+	}
+
+	/**
+	 * Forget aliases whose canonical session is gone for good.
+	 *
+	 * Adoption adds one alias per session lifecycle, and without this the map grows for the
+	 * life of the process — the same per-conversation retention the ring eviction prevents.
+	 * The sweep is deliberately deferred to here rather than run on drop: at drop time the
+	 * replacement that re-adopts these ids has not been created yet, and removing them then
+	 * left callers' own ids unresolvable.
+	 */
+	function pruneAliases() {
+		for (const [alias, canonical] of sessionAliases) {
+			if (!sessions.has(canonical)) sessionAliases.delete(alias);
+		}
+	}
+
+	function dropIfDead(session) {
+		if (!session || !isDead(session)) return session;
+		sessions.delete(session.id);
+		if (session.tmuxSession) attachRegistry.delete(session.tmuxSession);
+		// Aliases that named this id survive the drop: a replacement takes the same
+		// canonical id, and a client still holding its original id must keep resolving to it
+		// rather than 404ing until something happens to re-scan the store.
+		//
+		dropSession(session.id);
+		return null;
+	}
+
 	/** Attach-mode sessions keyed by tmux session name, so one pane maps to one bridge session. */
 	const attachRegistry = new Map(); // tmuxSession -> AttachSession
 
@@ -85,12 +148,36 @@ export function createBridge(config) {
 		return `tmux:${tmuxSession}`;
 	}
 
+	/**
+	 * True when a transcript is already followed by a DIFFERENT live attachment.
+	 *
+	 * Nothing in omp's artifacts ties a transcript to the pane that writes it, so a bridge with
+	 * two attachments in one cwd cannot tell which pane a new file belongs to — but it can tell
+	 * which files it is already tailing. Refusing those is what keeps the newest-wins
+	 * re-resolution from handing one pane another pane's turns.
+	 */
+	function claimPredicate(owner) {
+		return path => {
+			for (const other of attachRegistry.values()) {
+				if (other === owner) continue;
+				if (other.transcriptPath === path && !other.paneGone) return true;
+			}
+			return false;
+		};
+	}
+
 	function ensureAttached(entry) {
 		const existing = attachRegistry.get(entry.attach.tmuxSession);
+		// Every attachment must know which transcripts its siblings hold BEFORE any of them
+		// may adopt a path, or two attachments in one cwd race for the same file (see
+		// `isClaimed` in attach.js).
+		for (const attached of attachRegistry.values()) attached.isClaimed = claimPredicate(attached);
 		if (existing) {
-			if (!existing.transcriptPath && entry.attach.transcriptPath) {
-				existing.transcriptPath = entry.attach.transcriptPath;
-			}
+			// The pane may have started a NEW transcript since the attachment was
+			// created (a fresh TUI writes nothing until its first turn). Refreshing
+			// here is what keeps the answer stream pointed at the file the desk is
+			// actually appending to; a stale binding silently delivers nothing.
+			if (entry.attach.transcriptPath) existing.adoptTranscript(entry.attach.transcriptPath);
 			return existing;
 		}
 		const session = new AttachSession({
@@ -99,8 +186,13 @@ export function createBridge(config) {
 			cwd: entry.cwd,
 			provider: config.providerLabel,
 			config,
-			transcriptPath: entry.attach.transcriptPath,
+			// The LISTING's transcript is the bucket's newest, which in a shared cwd may belong
+			// to the other pane. Start with no binding and let the claim-guarded resolution pick
+			// one, rather than latching a file a sibling already follows.
+			transcriptPath: null,
 		});
+		session.isClaimed = claimPredicate(session);
+		if (entry.attach.transcriptPath) session.adoptTranscript(entry.attach.transcriptPath);
 		attachRegistry.set(entry.attach.tmuxSession, session);
 		sessions.set(session.id, session);
 		// Polling follows the transcript and scrapes the pane for dialogs; it
@@ -112,11 +204,69 @@ export function createBridge(config) {
 
 	/** Owned session for a session id, spawning omp on first use. */
 	async function ensureOwned(sessionId, { cwd, resumePath } = {}) {
+		dropIfDead(getLive(sessionId));
 		const existing = getLive(sessionId);
-		if (existing && !(existing instanceof OwnedSession && existing.rpc?.closed)) return existing;
+		if (existing) {
+			// The class cap can drop an id while its canonical session lives on. A caller
+			// re-prompting under that id must rejoin, or it is silently muted for good.
+			if (sessionId && sessionId !== existing.id) {
+				sessionAliases.set(sessionId, existing.id);
+				linkSessions(sessionId, existing.id);
+			}
+			return existing;
+		}
 		if (pendingSpawns.has(sessionId)) return pendingSpawns.get(sessionId);
 		const spawnPromise = (async () => {
-			const found = resumePath ?? findOmpSession(config, sessionId)?.path ?? null;
+			// A scan failure must not masquerade as "unknown id": starting fresh
+			// would silently drop the resume and fork the wearer's thread with no
+			// error anywhere. Surface it instead.
+			let found = resumePath ?? null;
+			if (!found) {
+				try {
+					found = findOmpSession(config, sessionId)?.path ?? null;
+				} catch (error) {
+					if (error.code === "SESSION_SCAN_FAILED") {
+						// The scan message embeds an absolute bucket path; it belongs in the log,
+						// not in a body a token holder can read.
+						log.warn(`could not resolve session ${sessionId ?? "-"}: ${error.message}`);
+						const wrapped = new Error("could not scan the session store");
+						wrapped.statusCode = 503;
+						throw wrapped;
+					}
+					throw error;
+				}
+			}
+			// The scan may have resolved this id to a transcript another child already owns:
+			// two client ids that prefix-match one transcript would otherwise each spawn a
+			// child, and the second `sessions.set` below would orphan the first past
+			// `bridge.close()`. Adopt the LIVE owner instead of spawning a duplicate.
+			//
+			// A dead owner must NOT be adopted: its child has exited, so every prompt would
+			// fail with "omp process is closed" until something unrelated evicted it. Falling
+			// through respawns, which is what the dead-session eviction exists to allow.
+			if (found) {
+				for (const existing of sessions.values()) {
+					const known = existing.sessionFile ?? existing.transcriptPath;
+					if (!known || known !== found) continue;
+					// A dead owner is evicted rather than adopted. It would otherwise answer
+					// every prompt with "omp process is closed" until something unrelated
+					// evicted it — the session is keyed by the id the wearer prompted with, and
+					// this caller reaches it only through the transcript, so `dropIfDead` above
+					// (which resolves by id) cannot see it.
+					if (isDead(existing)) {
+						dropIfDead(existing);
+						continue;
+					}
+					// The caller subscribed under ITS id, so record the alias and link the rings
+					// here too — otherwise getLive never resolves it and its SSE client, which
+					// holds the id it prompted with, never receives the adopted session's frames.
+					if (sessionId && sessionId !== existing.id) {
+						sessionAliases.set(sessionId, existing.id);
+						linkSessions(sessionId, existing.id);
+					}
+					return existing;
+				}
+			}
 			const args = [];
 			// A known transcript resumes in place so the transcript stays the
 			// single source of truth; unknown ids start a fresh session.
@@ -128,7 +278,15 @@ export function createBridge(config) {
 				config,
 				ompArgs: args,
 			});
-			await session.start();
+			// A start that rejects must not leave the child behind: the session is not
+			// in `sessions` yet, so neither a later prompt nor shutdown can reap it, and
+			// a retry would orphan another. Kill it here, where the ownership still is.
+			try {
+				await session.start();
+			} catch (error) {
+				session.kill();
+				throw error;
+			}
 			// omp mints the canonical session id (kept across a resume). Adopt it,
 			// and link the id the client already subscribed to, so whichever
 			// identity the app holds the answer still reaches its SSE ring.
@@ -138,8 +296,30 @@ export function createBridge(config) {
 				sessionAliases.set(clientId, session.id);
 				linkSessions(clientId, session.id);
 			}
+			// Every `sessions.set` is keyed by the session's OWN id, so an entry found here
+			// can only be a different session that claimed the same canonical id. Losing that
+			// race must not orphan a running child: keep the incumbent, drop the one we just
+			// started, and leave the alias recorded above alone — it already points at the
+			// canonical id the incumbent is stored under.
+			const incumbent = sessions.get(session.id);
+			if (incumbent && incumbent !== session) {
+				// The incumbent may have exited during our `start()`: adopting it would kill the
+				// healthy child we just started AND wedge every prompt on "omp process is
+				// closed", so a dead one is evicted and ours is kept instead.
+				if (isDead(incumbent)) {
+					dropIfDead(incumbent);
+				} else {
+					session.kill();
+					return incumbent;
+				}
+			}
 			sessions.set(session.id, session);
 			if (clientId && clientId !== session.id) sessions.delete(clientId);
+			// Sweep only now that a session is stored: an alias may name an id whose
+			// replacement has just taken it up, and removing it before that would leave the
+			// caller's own id unresolvable (the 404 this replace exists to avoid). An alias
+			// whose target is still missing resolves to nothing anyway, so dropping it is inert.
+			pruneAliases();
 			log.info(`owned session ${session.id} started (cwd=${session.cwd} resume=${found ?? "none"})`);
 			return session;
 		})();
@@ -158,12 +338,54 @@ export function createBridge(config) {
 	 * steered in place (the desk agent owns the process). Anything else gets an
 	 * owned `omp --mode rpc-ui` child, resuming the transcript when one exists.
 	 */
+	/**
+	 * Resolve an id to a session WITHOUT starting anything.
+	 *
+	 * For answering a dialog this is the only correct lookup: a dialog can exist solely on a
+	 * session the bridge is already driving, so a fresh owned child could never satisfy the
+	 * request. `resolveTarget` would spawn one for any id that names no live session and no
+	 * listed pane — so a stale or mistyped id (exactly what a client retries after a child
+	 * crashed) left an idle `omp` process registered for the bridge's lifetime.
+	 */
+	/**
+	 * `resolveAnswerable` with the fallback and the logging every dialog route needs.
+	 *
+	 * A rejection here is the attach scan failing, not an absent session, so it is logged rather
+	 * than reported as a plain 404 — otherwise a live session looks unknown with no trace of why.
+	 * The `getLive` fallback still runs, so a concurrent adoption mid-scan stays answerable.
+	 */
+	async function adoptAnswerable(sessionId) {
+		try {
+			const adopted = await resolveAnswerable(sessionId);
+			if (adopted) return adopted;
+		} catch (error) {
+			log.warn(`could not adopt ${sessionId}: ${error.message}`);
+		}
+		return dropIfDead(getLive(sessionId));
+	}
+
+	async function resolveAnswerable(sessionId) {
+		const live = dropIfDead(getLive(sessionId));
+		if (live) return live;
+		if (!config.attach) return null;
+		const attached = await findAttachEntry(sessionId);
+		return attached ? ensureAttached(attached) : null;
+	}
+
 	async function resolveTarget(sessionId, { cwd } = {}) {
-		const live = getLive(sessionId);
+		const live = dropIfDead(getLive(sessionId));
 		if (live) return live;
 		if (config.attach) {
 			const attached = await findAttachEntry(sessionId);
 			if (attached) return ensureAttached(attached);
+		}
+		if (typeof sessionId === "string" && sessionId.startsWith("tmux:")) {
+			// An explicit attach id names a desk pane, not a transcript. If that
+			// pane is gone, spawning an owned child would silently switch the
+			// wearer to a different session than the one they picked.
+			const error = new Error(`tmux session '${sessionId.slice(5)}' is not running`);
+			error.statusCode = 404;
+			throw error;
 		}
 		return ensureOwned(sessionId, { cwd });
 	}
@@ -175,6 +397,7 @@ export function createBridge(config) {
 	}
 
 	async function listSessions({ cwd, limit }) {
+		for (const session of [...sessions.values()]) dropIfDead(session);
 		const live = [...sessions.values()].map(session => ({
 			id: session.id,
 			title: session.title || "omp session",
@@ -185,7 +408,8 @@ export function createBridge(config) {
 			...(session.tmuxSession ? { attach: { tmuxSession: session.tmuxSession, transcriptPath: session.transcriptPath } } : {}),
 		}));
 		const attached = config.attach ? await listTmuxOmpSessions(config) : [];
-		const disk = listOmpSessions(config, { limit }).map(session => ({
+		const diskAll = listOmpSessions(config, { limit });
+		const disk = diskAll.map(session => ({
 			id: session.id,
 			title: session.title,
 			timestamp: session.timestamp,
@@ -195,28 +419,48 @@ export function createBridge(config) {
 		}));
 		const seen = new Set();
 		const merged = [];
-		// Live bridge sessions take priority; the tmux panes that back them merge
-		// by tmux name; remaining on-disk transcripts fill in the rest.
-		for (const session of [...live, ...attached, ...disk]) {
-			const key = session.attach ? `tmux:${session.attach.tmuxSession}` : session.id;
-			if (seen.has(key)) continue;
-			seen.add(key);
+		// Live bridge sessions take priority; a tmux pane merges with the on-disk
+		// transcript it is appending to (one desk conversation must appear once),
+		// and remaining on-disk transcripts fill in the rest.
+		const rows = [...live, ...attached, ...disk.map((session, index) => ({ ...session, path: diskAll[index].path }))];
+		for (const session of rows) {
+			const keys = sessionKeys(session);
+			if (keys.some(key => seen.has(key))) continue;
+			for (const key of keys) seen.add(key);
 			merged.push(session);
 		}
 		const filtered = cwd ? merged.filter(session => session.cwd === cwd) : merged;
 		return filtered.slice(0, limit);
 	}
 
+	/** Identity keys for one session row: its id, tmux name, and transcript path. */
+	function sessionKeys(session) {
+		const keys = [`id:${session.id}`];
+		if (session.attach) {
+			keys.push(`tmux:${session.attach.tmuxSession}`);
+			if (session.attach.transcriptPath) keys.push(`path:${session.attach.transcriptPath}`);
+		}
+		if (session.path) keys.push(`path:${session.path}`);
+		return keys;
+	}
+
 	const server = createServer(async (req, res) => {
 		const started = Date.now();
 		res.on("finish", () => {
-			log.info(`${req.socket.remoteAddress} ${res.statusCode} ${req.method} ${redactToken(req.url)} ${Date.now() - started}ms`);
+			// The socket can already be gone when the client aborts mid-body
+			// (e.g. after an early 413), so it is not safe to assume it exists.
+			log.info(`${req.socket?.remoteAddress ?? "-"} ${res.statusCode} ${req.method} ${redactToken(req.url)} ${Date.now() - started}ms`);
 		});
 		try {
 			await route(req, res);
 		} catch (error) {
-			log.error(`unhandled route error: ${error.message}`);
-			if (!res.headersSent) sendJson(res, 500, { error: error.message });
+			const status = typeof error.statusCode === "number" ? error.statusCode : 500;
+			if (status >= 500) log.error(`unhandled route error: ${error.message}`);
+			// A 5xx message can quote a filesystem path or a spawn failure; keep the detail
+			// in the log and answer the client with the category only. Deliberate 4xx
+			// messages are written for the caller and pass through unchanged.
+			const detail = status >= 500 ? "internal error" : error.message;
+			if (!res.headersSent) sendJson(res, status, { error: detail });
 			else res.end();
 		}
 	});
@@ -225,24 +469,26 @@ export function createBridge(config) {
 		const url = new URL(req.url, "http://localhost");
 		const path = url.pathname;
 
-		if (config.allowCors && req.method === "OPTIONS") {
-			res.writeHead(204, {
-				"Access-Control-Allow-Origin": "*",
-				"Access-Control-Allow-Headers": "authorization, content-type, last-event-id",
-				"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-			});
-			return res.end();
+		if (config.allowCors) {
+			// Preflight AND real responses need the header: a browser discards a
+			// response whose ACAO is missing even when the preflight passed.
+			res.setHeader("Access-Control-Allow-Origin", "*");
+			res.setHeader("Access-Control-Allow-Headers", "authorization, content-type, last-event-id");
+			res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+			if (req.method === "OPTIONS") {
+				res.writeHead(204);
+				return res.end();
+			}
 		}
 
 		if (path === "/healthz") {
+			// Unauthenticated by design (the stock server mounts auth on /api
+			// only), so it must not hand out host paths or counters. Those live
+			// behind the token on /api/info.
 			return sendJson(res, 200, {
 				ok: true,
 				provider: config.providerLabel,
 				backend: config.backend,
-				ownedSessions: sessions.size,
-				sseClients: totalClients(),
-				sessionsRoot: config.sessionsRoot,
-				uptimeMs: Math.round(process.uptime() * 1000),
 			});
 		}
 
@@ -259,6 +505,14 @@ export function createBridge(config) {
 		if (req.method === "GET" && path === "/api/events") {
 			const sessionId = url.searchParams.get("sessionId");
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId' query parameter" });
+			// Subscribe under the canonical session, so an id that the class cap evicted still
+			// receives the frames it is asking for rather than a stale replay and then silence.
+			const canonical = sessionAliases.get(sessionId) ?? sessionId;
+			const target = getLive(sessionId)?.id ?? canonical;
+			if (target && target !== sessionId) {
+				sessionAliases.set(sessionId, target);
+				linkSessions(sessionId, target);
+			}
 			const dispose = addClient(
 				sessionId,
 				res,
@@ -293,14 +547,17 @@ export function createBridge(config) {
 					expose: config.expose ?? "off",
 					backend: config.backend,
 					sessionsRoot: config.sessionsRoot,
+					ownedSessions: sessions.size,
+					sseClients: totalClients(),
+					uptimeMs: Math.round(process.uptime() * 1000),
 				},
 			});
 		}
 
 		if (req.method === "GET" && path === "/api/update-check") {
 			return sendJson(res, 200, {
-				packageName: "omp-terminal",
-				currentVersion: "0.1.0",
+				packageName: pkgName,
+				currentVersion: pkgVersion,
 				newestVersion: null,
 				updateAvailable: null,
 				checkedAt: new Date().toISOString(),
@@ -309,13 +566,26 @@ export function createBridge(config) {
 
 		const historyMatch = path.match(/^\/api\/sessions\/([^/]+)\/history$/);
 		if (req.method === "GET" && historyMatch) {
-			const id = decodeURIComponent(historyMatch[1]);
+			let id;
+			try {
+				id = decodeURIComponent(historyMatch[1]);
+			} catch {
+				return sendJson(res, 400, { error: "malformed session id in path" });
+			}
 			const limit = Math.min(Number(url.searchParams.get("limit")) || config.historyLimit, 20);
 			try {
 				// A bridge-owned session knows its exact transcript; a desk
 				// session is found by scanning the store.
 				const live = getLive(id);
 				const target = live?.sessionFile ?? live?.transcriptPath ?? id;
+				// Only a PATH may reach the filesystem branch. An id is opaque, and a percent-encoded
+				// slash survives URL pathname parsing, so `/api/sessions/a%2Fb.jsonl/history` decodes
+				// to a value with separators. A live session is exempt: its transcript comes from the
+				// bridge's own bookkeeping, and an attach id is `tmux:<name>` which may itself contain
+				// a slash.
+				if (!live && (target.includes("/") || target.includes("\\"))) {
+					return sendJson(res, 400, { error: "session id must not contain a path separator" });
+				}
 				const fromDisk = ompHistory(config, target, limit);
 				// omp flushes the transcript only when the session settles, so
 				// right after a turn the file may not exist yet. Fall back to the
@@ -323,7 +593,10 @@ export function createBridge(config) {
 				const history = fromDisk.length > 0 ? fromDisk : historyFromRing(live?.id ?? id, limit);
 				return sendJson(res, 200, { history });
 			} catch (error) {
-				return sendJson(res, 200, { history: historyFromRing(id, limit), error: error.message });
+				// The message can carry an absolute path from the session scan; that is for
+				// the log, not for a client that merely holds a token.
+				log.warn(`history for ${id} failed: ${error.message}`);
+				return sendJson(res, 200, { history: historyFromRing(id, limit), error: "could not read the session history" });
 			}
 		}
 
@@ -349,10 +622,16 @@ export function createBridge(config) {
 		if (req.method === "POST" && path === "/api/permission-response") {
 			const { sessionId, decision } = (await readJson(req)) ?? {};
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
-			const session = getLive(sessionId);
+			// Adopt on demand: /api/sessions lists every desk pane the scan finds, but only an adopted
+			// session is in `sessions`. Without this a client answering from a freshly listed id got
+			// 404 "Session not found" for a session it had just been told about. Adopting must not
+			// SPAWN, though — see resolveAnswerable.
+			const session = await adoptAnswerable(sessionId);
 			if (!session) return sendJson(res, 404, { error: "Session not found" });
-			const accepted = await session.answerPermission(decision || "deny");
-			if (!accepted) return sendJson(res, 400, { error: "No permission request is pending" });
+			// The refusal reason travels to the client: "nothing is pending" and "the card was not
+			// understood" are different situations, and only the first one means "do nothing".
+			const answered = await session.answerPermission(decision || "deny");
+			if (!answered.ok) return sendJson(res, 409, { error: answered.reason });
 			return sendJson(res, 200, { ok: true });
 		}
 
@@ -361,17 +640,20 @@ export function createBridge(config) {
 			const { sessionId, answer } = body;
 			log.info(`question-response raw=${JSON.stringify(answer)?.slice(0, 200)} (sessionId=${sessionId ?? "-"})`);
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
-			const session = getLive(sessionId);
+			const session = await adoptAnswerable(sessionId);
 			if (!session) return sendJson(res, 404, { error: "Session not found" });
-			const accepted = await session.answerQuestion(answer ?? "skip");
-			if (!accepted) return sendJson(res, 400, { error: "No question is pending" });
+			const answered = await session.answerQuestion(answer ?? "skip");
+			if (!answered.ok) return sendJson(res, 409, { error: answered.reason });
 			return sendJson(res, 200, { ok: true });
 		}
 
 		if (req.method === "POST" && path === "/api/interrupt") {
 			const { sessionId } = (await readJson(req)) ?? {};
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
-			const session = getLive(sessionId);
+			// Adopt a listed desk pane, but never spawn: interrupting is about a session already
+			// running, and a freshly spawned child would have nothing to abort. Without the adopt,
+			// an id straight out of /api/sessions 404'd here while the dialog routes accepted it.
+			const session = await adoptAnswerable(sessionId);
 			if (!session) return sendJson(res, 404, { error: "Session not found" });
 			try {
 				await session.interrupt();
@@ -385,9 +667,19 @@ export function createBridge(config) {
 		if (req.method === "GET" && path === "/api/status") {
 			const sessionId = url.searchParams.get("sessionId");
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
-			const session = getLive(sessionId);
+			const session = dropIfDead(getLive(sessionId));
 			if (session) return sendJson(res, 200, { state: session.state, sessionId, provider: config.providerLabel });
-			const found = findOmpSession(config, sessionId);
+			// The same call is mapped to 503 in ensureOwned: a scan that could not complete
+			// must not surface as a 500 with the sessions root in the message.
+			let found;
+			try {
+				found = findOmpSession(config, sessionId);
+			} catch (error) {
+				if (error.code === "SESSION_SCAN_FAILED") {
+					return sendJson(res, 503, { error: "could not scan the session root" });
+				}
+				throw error;
+			}
 			if (!found) return sendJson(res, 404, { error: "Session not found" });
 			return sendJson(res, 200, { state: "idle", sessionId, provider: config.providerLabel });
 		}
@@ -396,9 +688,13 @@ export function createBridge(config) {
 			const sessionId = url.searchParams.get("sessionId");
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
 			const after = Number(url.searchParams.get("after")) || 0;
-			const session = getLive(sessionId);
+			const session = dropIfDead(getLive(sessionId));
+			// Resolve through the live session the same way SSE does, so a polling id that the
+			// lookup cap forgot still reads its session's ring instead of [].
+			const target = session?.id ?? sessionId;
+			if (target !== sessionId) linkSessions(sessionId, target);
 			return sendJson(res, 200, {
-				messages: getMessages(sessionId, after),
+				messages: getMessages(target, after),
 				state: session?.state ?? "idle",
 				sessionId,
 				provider: config.providerLabel,

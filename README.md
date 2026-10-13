@@ -79,7 +79,7 @@ backend is always named separately:
 
 ```json
 GET /api/info   → { "provider": "claude", "extra": { "backend": "omp", ... } }
-GET /healthz    → { "ok": true, "provider": "claude", "backend": "omp", ... }
+GET /healthz    → { "ok": true, "provider": "claude", "backend": "omp" }
 ```
 
 Override with `--provider-label codex` (or `claude-sync`) if you prefer the other
@@ -195,7 +195,11 @@ All optional; flags override environment variables.
 | `OMP_TERMINAL_PROVIDER_LABEL` | `claude` | provider name on the wire (`claude` \| `claude-sync` \| `codex`) |
 | `OMP_TERMINAL_BUSY_WINDOW_MS` | `120000` | freshness window before a trailing unfinished turn reads idle |
 | `OMP_TERMINAL_TAIL_INTERVAL_MS` | `500` | attach-mode transcript poll interval |
+| `OMP_TERMINAL_LOG_LEVEL` | `info` | `debug` \| `info` |
 | `EVEN_ALLOW_CORS` | `0` | allow cross-origin browser requests |
+
+A `.env` file in the working directory is read at startup (real environment
+variables take precedence).
 
 ## Verify
 
@@ -204,6 +208,7 @@ npm run check        # every file parses (no dependencies, no build)
 npm run test:ci      # contract tests — what CI runs
 npm run test:attach  # pane-scraping unit tests (also CI)
 npm run test:live    # full loop: real omp child + real tmux TUI
+npm run test:permission  # a gated tool approved through the bridge
 ```
 
 `npm run test:ci` drives the real HTTP surface and asserts the Even wire

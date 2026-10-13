@@ -32,8 +32,9 @@ ln -sfn "$PWD/bin/omp-terminal.js" ~/.local/bin/omp-terminal
 | `npm run test:ci` | contract tests: auth gate, session list, SSE paint-and-persist burst, canonical session id, history, `ask` round-trip | Node |
 | `npm run test:attach` | the `Allow tool:` pane scraper against real captured pane text | Node |
 | `npm run test:live` | the whole loop against a real omp child and a real tmux-hosted TUI | Node, `omp`, `tmux` |
+| `npm run test:permission` | a gated tool call approved through the bridge: the card is announced, the answer is accepted, and the tool runs | Node, `omp`, `tmux` |
 
-CI runs the first three. `test:live` is manual because it needs a local `omp`
+CI runs the first three. `test:live` and `test:permission` are manual because they need a local `omp`
 and a tmux server; run it before merging anything that touches session
 management, the RPC client, or attach mode.
 

@@ -73,9 +73,35 @@ export class OmpRpc extends EventEmitter {
 				if (line.trim()) log.debug(`stderr: ${line.trim()}`);
 			}
 		});
+		// A pipe write racing the child's death raises EPIPE/ERR_STREAM_DESTROYED on the
+		// socket ASYNCHRONOUSLY, so the try/catch around write() cannot intercept it and an
+		// unhandled 'error' event would take the whole bridge down — every SSE client with
+		// it. A wearer tapping Allow on a permission card as omp crashes hits exactly this.
+		// The child's own 'exit' handler already fails the pending requests.
+		this.#child.stdin.on("error", error => {
+			log.warn(`stdin closed: ${error.code ?? error.message}`);
+		});
+		this.#child.stdout.on("error", error => {
+			// A stdout failure leaves readline silent, so no frame would ever arrive again and
+			// #closed stays false: isDead() would never evict the session and every later
+			// send() would burn its full timeout. Kill so the 'exit' path fails the pending
+			// requests and the bridge respawns on the next prompt.
+			log.warn(`stdout closed: ${error.code ?? error.message}`);
+			this.kill();
+		});
+		this.#child.stderr.on("error", error => {
+			log.warn(`stderr closed: ${error.code ?? error.message}`);
+		});
 		this.#rl = createInterface({ input: this.#child.stdout, crlfDelay: Infinity });
 		this.#rl.on("line", line => this.#handleLine(line));
-		await this.#waitReady();
+		// A ready wait that times out must not orphan the child we just spawned: the
+		// caller has no reference to it, so nothing else can ever reap it.
+		try {
+			await this.#waitReady();
+		} catch (error) {
+			this.kill();
+			throw error;
+		}
 	}
 
 	#handleLine(line) {

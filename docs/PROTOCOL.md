@@ -41,8 +41,8 @@ http://<host>:<port>?token=<token>&defaultProvider=<provider>
 | `GET /api/info` | `{ account, model, version, provider }` |
 | `GET /api/sessions/:id/history?limit=` | `{ history: [{ role, text }] }` |
 | `POST /api/prompt` | `{ text, sessionId?, cwd? }` → `202 { ok, sessionId, provider }` |
-| `POST /api/permission-response` | `{ sessionId, decision: allow \| allowAlways \| deny }` |
-| `POST /api/question-response` | `{ sessionId, answer }` |
+| `POST /api/permission-response` | `{ sessionId, decision: allow \| allowAlways \| deny }` — `200` on submit, `409` naming the reason in `error` when the card was not understood |
+| `POST /api/question-response` | `{ sessionId, answer }` — `200` on submit, `409` when the card could not be answered |
 | `POST /api/interrupt` | `{ sessionId }` |
 | `GET /api/status?sessionId=` | `{ state: busy \| idle \| awaiting, sessionId, provider }` |
 | `GET /api/messages?sessionId=&after=` | ring poll fallback |
@@ -109,6 +109,17 @@ Without rule 3, a frame broadcast while the glasses were disconnected is lost
 forever. A content frame (`text_delta` / `result`) broadcast with no live client
 is logged as a warning, not silently swallowed.
 
+A ring is freed once nothing can read it again — no attached client, and no live
+id in its equivalence class — because a fresh conversation mints a fresh id and a
+long-lived bridge would otherwise retain one 500-frame ring per conversation ever
+started.
+
+A client that completes the handshake and then stops reading never trips
+`close`, so it is dropped once more than 4 MiB is buffered for it, during the
+replay burst as well as live. Nothing is lost: the ring keeps the frames and a
+reconnect replays them from the cursor above, which is the same path a dark-lens
+reconnect already takes.
+
 ### 1.6 Pairing durability
 
 The stock server persists a pairing token in `~/.even-terminal/config.json`
@@ -122,6 +133,11 @@ flaky with no visible error. `omp-terminal` matches the stock behaviour —
 generate once, persist to `~/.omp-terminal/config.json` (`0600`), reuse — and
 reports the provenance in the banner (`(config)` / `(generated)` / `(flag)` /
 `(env)`).
+
+The store is written to a sibling temp file and renamed into place, so a crash or
+a full disk during a save cannot leave a truncated file whose parse error would
+be swallowed and whose next boot would rotate the token — the failure this
+section exists to prevent.
 
 Quick tunnels are the residue: pinggy and cloudflare **quick** tunnels mint a new
 hostname per run (`*.free.pinggy.net`, `*.trycloudflare.com`), so the public URL
@@ -200,6 +216,25 @@ Answer with `{"type":"extension_ui_response","id":"…","value":"Approve"}`.
 The `title` carries the stock "Allow tool: …" body, so it maps straight onto the
 Even `permission_request` frame's `description`/`detail`.
 
+`options` is `string[]` — plain labels, not objects — and the reply is the chosen
+LABEL, which omp tests as `value === "Approve"` (read off the shipped 18.10.1
+binary: `N.select(<Allow tool: …>, ["Approve","Deny"])`). The Even frame's `options`
+carry `{text, key}` instead, where `key` stays the stock `allow`/`allowAlways`/`deny`
+decision and `text` must be the label the wearer answered with, so the announce
+mirrors the card's own rows rather than a fixed `Yes`/`No`. Verified end to end:
+answering `allow` runs the gated tool (`test/live-permission.mjs`).
+
+A refusal is a `409` naming the reason in the `error` field, never a bare `400`: "no permission card is on
+screen" and "the card is there but was not understood" call for different behaviour, and the
+wearer is told to wait in only the first case. A `404` means the id names nothing at all — the
+dialog routes adopt a listed desk pane on demand, so an id straight out of `/api/sessions`
+resolves.
+
+Do not confuse this with the option IDs `allow_once`/`allow_always`/`reject_once`/
+`reject_always`. Those belong to a different path — a host `requestPermission` hook
+that resolves the reply through a registry and throws `Tool permission response used
+unknown option ID` — and are not what the rpc-ui `select` dialog offers.
+
 An `ask` question arrives as `method:"ask"` (**only after the host opts in with
 `{"type":"set_ask_dialog","enabled":true}`**; otherwise the tool degrades to
 `select`/`editor` dialogs). Answer with:
@@ -209,8 +244,23 @@ An `ask` question arrives as `method:"ask"` (**only after the host opts in with
  "answers":[{"id":"colour","selectedOptions":["Blue"]}]}
 ```
 
+`selectedOptions` entries are validated against the offered labels and an
+unknown label **fails the whole tool call** (`Ask dialog answer "colour"
+selected unknown option "…"`). Free text — a dictated label that matches no
+option — must travel as `customInput` instead:
+
+```json
+{"type":"extension_ui_response","id":"…",
+ "answers":[{"id":"colour","selectedOptions":[],"customInput":"Chartreuse"}]}
+```
+
+Verified live: that shape resolves with `User provided custom input: Chartreuse`
+and `isError: false`, while the `selectedOptions` form errors.
+
 `confirm` resolves with `{"confirmed": true}`, `input`/`editor` with
-`{"value": "…"}`.
+`{"value": "…"}`. omp also emits `method:"cancel"` with a `targetId` when it
+settles a dialog itself (abort or timeout): the host must close that dialog,
+and a late answer to it is ignored.
 
 ### 2.4 Sessions, busy handling, and abort
 
@@ -237,9 +287,39 @@ Verified live: a tmux pane whose `pane_current_command` is `omp` hosts the TUI.
 
 - Prompt injection: `tmux send-keys -t <session> -l '<text>'` then `Enter`.
 - The approval menu renders as a bordered box headed `Allow tool: <name>` with an
-  `❯ Approve` / `Deny` list; `Enter` approves, `Down`+`Enter` denies.
+  `Approve` / `Deny` list and a `\uf054` focus marker on the highlighted row;
+  `Enter` submits the highlighted row, `Down`/`Up` move it.
+- An `ask` renders as a bordered `╭─ Ask ─…` box: the question, then one row per
+  option as `\uf054 \uf10c <label>`. `\uf054` is the focus marker; the option
+  marker is a private-use glyph that differs between Nerd Font revisions
+  (`U+F096`, `U+F10C` both observed live).
+- The block's marker is decided by the EMPTY markers its rows carry, on a strict
+  lead only, because the marker is a constant function of the dialog's mode. Any
+  other private-use glyph is a stray — an icon inside a wrapped question line —
+  and admitting one would inflate `focusRow` and shift every dictated index. When
+  the block renders no known marker at all the dialog uses an alternate icon set;
+  its checked-variant glyph cannot be named, so it is indistinguishable from a
+  stray and every row is kept rather than risking the loss of a real option. All
+  twelve live captures use only the known markers.
+- The dialog's key-hint bar distinguishes the two modes: `toggle` for
+  multi-select, `select` for single-select — both draw the same marker when
+  unchecked, so the hint bar is the only reliable signal.
+- Answering single-select is `Down`/`Up` to the row, then `Enter`. Multi-select
+  toggles the focused row with `Space` and submits with `Enter`.
+- A closed dialog leaves a borderless echo box in the transcript (`╭─── Ask 1
+  questions ─…`). It is not a live dialog: it has no focus marker and no framed
+  option rows, and the parser requires both.
 - Reads come from the transcript the TUI appends to, located via
-  `pane_current_path` → `<sessionsRoot>/<encoded-cwd>/`.
+  `pane_current_path` → `<sessionsRoot>/<encoded-cwd>/`. Line offsets are bytes
+  (the transcript can contain non-ASCII), and a fresh assistant record is
+  rewound to so a turn finishing around a transcript swap still paints.
+- **Two TUIs in one cwd share one transcript.** Measured: starting a second
+  `omp` in the same directory resumed the existing session file rather than
+  minting a new one — both panes appended to the same bucket file. The "which
+  pane owns this transcript" question is therefore moot for panes in one cwd:
+  there is one conversation, and the newest file in the bucket is it. (A pane's
+  open files cannot be used to disambiguate either: `omp` opens the transcript
+  per append and holds no lasting descriptor.)
 
 The bridge never owns the process in this mode: the desk agent stays the sole
 writer of the transcript.

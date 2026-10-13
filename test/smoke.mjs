@@ -9,7 +9,7 @@
  *
  * Usage: node test/smoke.mjs [--no-omp]
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config.js";
@@ -25,8 +25,14 @@ const config = loadConfig({
 		token: "smoke-token",
 		logLevel: "warn",
 		attach: false,
+		// A temp store: nothing here may read or write the host's real ~/.omp/agent or
+		// ~/.omp-terminal, both of which hold the wearer's own data.
+		sessionsRoot: join(workDir, "sessions"),
 	},
+	store: {},
+	storePath: join(workDir, "config.json"),
 });
+mkdirSync(config.sessionsRoot, { recursive: true });
 configureLog({ level: "warn" });
 
 // Port 0 means "pick a free port"; probe the bound port after listen().
@@ -66,10 +72,9 @@ console.log("sessions");
 	const response = await fetch(`${base}/api/sessions?limit=5`, { headers: auth });
 	const body = await response.json();
 	check("200 with session list", response.status === 200 && Array.isArray(body.sessions));
-	check(
-		"session shape",
-		body.sessions.every(s => s.id && s.provider === config.providerLabel && "status" in s),
-	);
+	// The row SHAPE is asserted below instead, after a session exists. Under --no-omp nothing
+	// ever starts one, and here the seeds are not written yet, so a check on this list could
+	// only ever be skipped — which is what it used to do, while claiming to verify the shape.
 }
 
 if (withOmp) {
@@ -87,6 +92,19 @@ if (withOmp) {
 	// then covers the frames emitted before the subscription attached.
 	const canonicalId = promptBody.sessionId;
 	check("prompt response names a session", Boolean(canonicalId));
+
+	// Assert the row shape HERE, where a session provably exists. The earlier /api/sessions
+	// block could only ever skip this under --no-omp (nothing starts a session) and ran before
+	// the seeds were written, so the shape had never actually been checked in CI.
+	{
+		const listed = await (await fetch(`${base}/api/sessions?limit=5`, { headers: auth })).json();
+		const row = (listed.sessions ?? []).find(session => session.id === canonicalId);
+		check(
+			"session row carries id, provider and status",
+			Boolean(row) && row.id === canonicalId && row.provider === config.providerLabel && "status" in row,
+			JSON.stringify(row ?? listed.sessions?.[0]),
+		);
+	}
 
 	const stream = await fetch(`${base}/api/events?sessionId=${canonicalId}&needReplay=true`, { headers: auth });
 	const reader = stream.body.getReader();
@@ -199,6 +217,64 @@ console.log("parseQuestionAnswer unit checks");
 	check("bare index resolves to the second option", byIndex[0]?.selectedOptions[0] === "Blue");
 	const byCase = parseQuestionAnswer("red", questions);
 	check("case-insensitive label resolves", byCase[0]?.selectedOptions[0] === "Red");
+	// Own keys only on the OWNED path too: a bare `keyed[name]` walks the prototype chain, so a
+	// question the agent named `toString` resolved `Object.prototype.toString` and sent omp
+	// `customInput: "function toString() { [native code] }"` for a row the wearer actually picked.
+	const protoQuestions = [{ id: "toString", question: "toString", options: [{ label: "Red" }, { label: "Blue" }] }];
+	const byIndexProto = parseQuestionAnswer({ 0: "Blue" }, protoQuestions);
+	check("an index-keyed answer resolves for a question named toString",
+		JSON.stringify(byIndexProto[0]?.selectedOptions) === JSON.stringify(["Blue"]) && byIndexProto[0]?.customInput === undefined,
+		JSON.stringify(byIndexProto[0]));
+	const byTextProto = parseQuestionAnswer({ toString: "Blue" }, protoQuestions);
+	check("a text-keyed answer resolves for a question named toString",
+		JSON.stringify(byTextProto[0]?.selectedOptions) === JSON.stringify(["Blue"]) && byTextProto[0]?.customInput === undefined,
+		JSON.stringify(byTextProto[0]));
+}
+
+// The dialog routes read `.ok` off the answer result, so BOTH session types must return
+// `{ ok }`. A bare boolean makes a SUCCESSFUL answer report as a 409 while it was already
+// applied; the ask round-trip above only runs under a real omp child, so `--no-omp` (what CI
+// runs) could not catch it.
+console.log("dialog answer result shape");
+{
+	const { OwnedSession } = await import("../src/provider.js");
+	const { AttachSession } = await import("../src/attach.js");
+	const owned = new OwnedSession({ id: "shape", provider: "p", config: { sessionsRoot: "/tmp" } });
+	const attach = new AttachSession({ id: "shape", tmuxSession: "props", cwd: "/tmp", provider: "p", config: { sessionsRoot: "/tmp", tailIntervalMs: 500 }, transcriptPath: null });
+	// Nothing pending: a refusal, still shaped `{ ok, reason }`.
+	for (const [name, session] of [["owned", owned], ["attach", attach]]) {
+		const refused = await session.answerQuestion("x");
+		check(`an ${name} session refuses a question answer with a reason`,
+			refused?.ok === false && typeof refused.reason === "string" && refused.reason.length > 0,
+			JSON.stringify(refused));
+		const refusedPerm = await session.answerPermission("allow");
+		check(`an ${name} session refuses a permission answer with a reason`,
+			refusedPerm?.ok === false && typeof refusedPerm.reason === "string" && refusedPerm.reason.length > 0,
+			JSON.stringify(refusedPerm));
+	}
+
+	// The reply must name the row omp OFFERED, not a hardcoded pair: the announce mirrors
+	// `frame.options`, so a reply using other words answers a question the card did not ask.
+	const ownedReplies = new OwnedSession({ id: "shape-reply", provider: "p", config: { sessionsRoot: "/tmp" } });
+	const sent = [];
+	ownedReplies.rpc = { respond: (_id, value) => sent.push(value), send: async () => {} };
+	for (const [offered, decision, want] of [
+		[["Approve", "Deny"], "allow", "Approve"],
+		[["Approve", "Deny"], "deny", "Deny"],
+		[["Yes", "No"], "allow", "Yes"],
+		[["Yes", "No"], "deny", "No"],
+		// A blank row must not be replied verbatim: the announce drops it (so it shows the stock
+		// pair), and the reply has to agree with what was shown rather than send an empty string.
+		[["Approve", ""], "deny", "Deny"],
+		[["", "Deny"], "allow", "Approve"],
+	]) {
+		sent.length = 0;
+		ownedReplies.pendingDialogs.set("d", { method: "select", title: "Allow tool: b", options: offered });
+		await ownedReplies.answerPermission(decision);
+		check(`a permission reply names the offered row (${JSON.stringify(offered)} ${decision})`,
+			sent[0]?.value === want,
+			JSON.stringify(sent[0]));
+	}
 }
 
 console.log("tunnel provider parsing");
@@ -261,6 +337,278 @@ console.log("tunnel provider parsing");
 	} finally {
 		delete process.env.BORE_PROGRAM_PATH;
 	}
+}
+
+console.log("auth and path confinement");
+{
+	// An empty token must never disable auth: `?token=` would satisfy it from any caller.
+	// A scratch store path: generating a token must never write the host's real
+	// ~/.omp-terminal/config.json, which would rotate the pairing of a paired wearer.
+	const empty = loadConfig({ flags: { token: "" }, store: {}, storePath: join(workDir, "empty-token.json") });
+	check("an empty --token generates one instead of disabling auth", empty.token.length > 0 && empty.tokenSource === "generated", `${JSON.stringify(empty.token)}/${empty.tokenSource}`);
+
+	// A session id is opaque. A path that escapes the sessions root must not be read,
+	// even though it exists and ends in .jsonl.
+	const { findOmpSession, listOmpSessions } = await import("../src/sessions.js");
+	const outside = join(workDir, "outside.jsonl");
+	writeFileSync(outside, `${JSON.stringify({ type: "title", title: "outside" })}\n`);
+	check("a transcript outside the sessions root is never resolved", findOmpSession(config, outside) === null);
+	// The escape target must EXIST, or the check passes for the wrong reason (nothing to
+	// find) rather than because the path was refused.
+	const escape = join(config.sessionsRoot, "..", "outside.jsonl");
+	writeFileSync(escape, `${JSON.stringify({ type: "title", title: "escaped" })}\n`);
+	check("nor via a traversal out of the root to a real file", existsSync(escape) && findOmpSession(config, escape) === null);
+	check("a non-string session id is an unknown id, not a throw", findOmpSession(config, 123) === null);
+	// Confinement must follow symlinks. resolve() is lexical, so a link inside the root pointing
+	// anywhere on the host used to pass the check while its target was parsed and served.
+	const secretDir = join(workDir, "secret");
+	mkdirSync(secretDir, { recursive: true });
+	const secret = join(secretDir, "outside-target.jsonl");
+	writeFileSync(secret, `${JSON.stringify({ type: "title", title: "SECRET" })}\n`);
+	const link = join(config.sessionsRoot, "link.jsonl");
+	// Guarded: symlinkSync throws on a filesystem that rejects links (or if a stale file is
+	// there), and an unguarded throw would abandon every remaining check and leak the temp dir.
+	try {
+		symlinkSync(secret, link);
+		check("a symlink inside the root does not yield an outside file",
+			findOmpSession(config, link) === null,
+			JSON.stringify(findOmpSession(config, link)?.title));
+	} catch (error) {
+		console.log(`  ~ symlink check skipped: ${error.message}`);
+	}
+	// An in-root transcript must still resolve, so the check is not over-broad.
+	const inside = join(config.sessionsRoot, "inside.jsonl");
+	writeFileSync(inside, `${JSON.stringify({ type: "title", title: "ok" })}\n`);
+	check("an in-root transcript still resolves", findOmpSession(config, inside) !== null);
+	check("the store scan still returns sessions", Array.isArray(listOmpSessions(config, { limit: 1 })));
+	// A listing must not parse every transcript to return a few: the options object is the
+	// signature, and `limit` bounds the WORK, not just the result slice.
+	//
+	// Seeded with REAL two-record transcripts. Without a `session` record a candidate is skipped
+	// at `if (!head.sessionId) continue`, so the old `length <= 1` was satisfied by an empty list
+	// and would have passed however the limit were broken.
+	// The scan reads `<sessionsRoot>/<encoded-cwd>/*.jsonl`, so the seeds go in a bucket.
+	const seedDir = join(config.sessionsRoot, "seed-bucket");
+	mkdirSync(seedDir, { recursive: true });
+	for (const index of [1, 2, 3]) {
+		writeFileSync(
+			join(seedDir, `seed${index}.jsonl`),
+			`${JSON.stringify({ type: "title", title: `seed-${index}` })}\n` +
+			`${JSON.stringify({ type: "session", id: `seed-${index}`, cwd: config.cwd })}\n`,
+		);
+	}
+	const limited = listOmpSessions(config, { limit: 1 });
+	check("the store scan honours limit against real transcripts",
+		limited.length === 1,
+		JSON.stringify(limited.map(s => s.id)));
+}
+
+console.log("sse ring lifecycle");
+{
+	// A long-lived bridge mints a fresh id per conversation, so a ring that is never
+	// freed retains every conversation's frames for the life of the process. The ring
+	// is dropped only once nothing can read it again: an attached client or a live
+	// alias must hold it open.
+	const events = await import("../src/events.js");
+	const fake = { write() {}, end() {}, on() {}, once() {}, setHeader() {}, flushHeaders() {}, writableEnded: false, destroyed: false };
+	events.emit("ring-test", { type: "user_prompt", text: "hi" });
+	check("a ring with no client is reclaimable", events.dropSession("ring-test") === true);
+	const live = "ring-live";
+	events.emit(live, { type: "user_prompt", text: "hi" });
+	events.addClient(live, fake, false, null);
+	check("a ring with an attached client is not reclaimed", events.dropSession(live) === false);
+	check("its history stays readable for the reconnect", events.historyFromRing(live).length > 0);
+	// A linked class is one session under two names: dropping only the canonical leaves
+	// the alias holding a full copy of every frame.
+	events.linkSessions("ring-alias", "ring-canon");
+	events.emit("ring-canon", { type: "user_prompt", text: "x" });
+	check("a linked class drops as a unit", events.dropSession("ring-canon") === true);
+	// A client that stops reading must be dropped rather than buffered without bound:
+	// its frames stay in the ring and a reconnect replays them from the cursor.
+	const stalled = {
+		writableLength: 8 * 1024 * 1024,
+		// The `:ok` primer is sent before the client is registered, so it is expected;
+		// anything carrying a frame id is not.
+		write(chunk) {
+			if (String(chunk).startsWith("id: ")) throw new Error("must not buffer frames for a stalled client");
+		},
+		end() { this.ended = true; },
+		on() {}, once() {}, setHeader() {}, flushHeaders() {}, writableEnded: false, destroyed: false,
+	};
+	events.emit("ring-stall", { type: "user_prompt", text: "hi" });
+	events.addClient("ring-stall", stalled, false, null);
+	const before = events.totalClients();
+	events.emit("ring-stall", { type: "text_delta", text: "x" });
+	// The primer is sent before registration, so only the FRAME write is forbidden; the
+	// `write` above throws if one is attempted.
+	check("a client too far behind is dropped, not buffered", stalled.ended === true && events.totalClients() === before);
+
+	// Dropping a stalled client must also stop its heartbeat: a timer still writing after
+	// end() raises ERR_STREAM_WRITE_AFTER_END asynchronously, which is an unhandled 'error'
+	// event and took the whole bridge down. The teardown is observable via the dispose
+	// marker, so assert it ran rather than waiting 15 s for the tick.
+	const stalledRes = {
+		writableLength: 0, // starts healthy, so it registers and gets a heartbeat
+		write() {},
+		end() { this.ended = true; },
+		on() {}, once() {}, setHeader() {}, flushHeaders() {}, writableEnded: false, destroyed: false,
+	};
+	events.emit("ring-hb", { type: "user_prompt", text: "hi" });
+	events.addClient("ring-hb", stalledRes, false, null);
+	// It falls behind only once attached, which is the case the emit-path drop handles.
+	stalledRes.writableLength = 8 * 1024 * 1024;
+	const marker = Symbol.for("omp-terminal.dispose");
+	const armed = typeof stalledRes[marker] === "function";
+	events.emit("ring-hb", { type: "text_delta", text: "x" });
+	// `armed` proves it was registered with a heartbeat; the marker disappearing proves the
+	// teardown ran. Nothing here waits out a 15 s tick, so asserting only `ended` would pass
+	// without the teardown and miss the write-after-end crash entirely.
+	check(
+		"dropping a stalled client stops its heartbeat",
+		armed && stalledRes.ended === true && stalledRes[marker] === undefined,
+		`armed=${armed} ended=${stalledRes.ended} tornDown=${stalledRes[marker] === undefined}`,
+	);
+
+	// Every id of a session shares ONE ring: a per-id ring would copy each frame once per id,
+	// so memory would grow with the ids a caller can invent and forgetting an id would throw
+	// its history away. The cap therefore bounds the LOOKUP, never the frames.
+	events.emit("cap", { type: "user_prompt", text: "hi" });
+	for (let i = 0; i < 400; i++) events.linkSessions(`cap-alias-${i}`, "cap");
+	events.emit("cap", { type: "text_delta", text: "x" });
+	// 401 ids, one ring: two entries, not 401 copies.
+	check("ids of one session share a single ring",
+		events.historyFromRing("cap-alias-399", 50).length === 1 &&
+		events.getMessages("cap", 0).length === 2,
+		`history=${events.historyFromRing("cap-alias-399", 50).length} ring=${events.getMessages("cap", 0).length}`);
+	// The cap forgets the LEAST-RECENTLY-USED names, and an id a client is subscribed under
+	// keeps its name: the stream and the poll route both reach the class through it.
+	check("the canonical id keeps its own ring", events.getMessages("cap", 0).length === 2,
+		`canonical=${events.getMessages("cap", 0).length}`);
+	// A linked caller reads the canonical ring. The cap may later forget that caller's NAME —
+	// it is neither the emit id nor subscribed — which is why forgetting only ever drops the
+	// lookup: re-linking restores access to the same history.
+	{
+		events.linkSessions("tie-caller", "tie-canonical");
+		events.emit("tie-canonical", { type: "result", text: "x" });
+		check("a linked caller reads the canonical ring",
+			events.historyFromRing("tie-caller", 50).length === 1,
+			`caller=${events.historyFromRing("tie-caller", 50).length}`);
+		for (let i = 0; i < 400; i++) events.linkSessions(`tie-junk-${i}`, "tie-canonical");
+		// Assert the intermediate state, or the recovery check passes even when nothing was
+		// forgotten (verified: disabling the trim left that check green).
+		check("cap pressure drops the unsubscribed caller's name",
+			events.getMessages("tie-caller", 0).length === 0,
+			`caller=${events.getMessages("tie-caller", 0).length}`);
+		events.linkSessions("tie-caller", "tie-canonical");
+		check("a forgotten caller recovers by re-linking, with its history intact",
+			events.historyFromRing("tie-caller", 50).length === 1,
+			`caller=${events.historyFromRing("tie-caller", 50).length}`);
+	}
+
+	// Both sides of a merge can have emitted. The loser's id must keep owning the shared ring: if
+	// the cap forgot it, a later emit under it would mint a fresh class and strand the frames and
+	// clients that just moved to the survivor.
+	{
+		events.emit("merge-src", { type: "result", text: "source frame" });
+		events.emit("merge-tgt", { type: "result", text: "target frame" });
+		events.linkSessions("merge-src", "merge-tgt");
+		for (let i = 0; i < 400; i++) events.linkSessions(`merge-junk-${i}`, "merge-tgt");
+		events.emit("merge-src", { type: "result", text: "after merge" });
+		const texts = events.historyFromRing("merge-tgt", 50).map(item => item.text);
+		check("a merged-away id that emitted is not stranded",
+			texts.includes("source frame") && texts.includes("after merge"),
+			JSON.stringify(texts));
+	}
+
+	// An emit under an alias of a multi-id class goes to the class's ONE ring: it must not be
+	// dropped (that would silence every subscriber) nor duplicated.
+	{
+		events.emit("aliascase", { type: "result", text: "first" });
+		events.linkSessions("aliascase-alias", "aliascase");
+		const frames = { write(chunk) { for (const m of String(chunk).matchAll(/^id: (\d+)/gm)) (this.ids ??= []).push(Number(m[1])); }, end() {}, on() {}, once() {}, setHeader() {}, flushHeaders() {}, writableEnded: false, destroyed: false };
+		events.addClient("aliascase-alias", frames, false, null);
+		const before = (frames.ids ?? []).length;
+		events.emit("aliascase-alias", { type: "result", text: "second" });
+		check("an emit under an alias reaches the subscribers", (frames.ids ?? []).length - before === 1,
+			`frames=${(frames.ids ?? []).length - before}`);
+		check("and lands in the one ring without duplicating",
+			events.historyFromRing("aliascase", 50).length === 2,
+			`history=${events.historyFromRing("aliascase", 50).length}`);
+	}
+	events.emit("capped", { type: "user_prompt", text: "q" });
+	events.linkSessions("capped-live", "capped");
+	const cappedRes = { write() {}, end() {}, on() {}, once() {}, setHeader() {}, flushHeaders() {}, writableEnded: false, destroyed: false };
+	events.addClient("capped-live", cappedRes, false, null);
+	for (let i = 0; i < 400; i++) events.linkSessions(`capped-junk-${i}`, "capped");
+	check("a subscribed id keeps its name past the lookup cap",
+		events.getMessages("capped-live", 0).length > 0,
+		`live id messages=${events.getMessages("capped-live", 0).length}`);
+	check("the cap forgets an idle id instead",
+		events.getMessages("capped-junk-0", 0).length === 0,
+		`junk-0 messages=${events.getMessages("capped-junk-0", 0).length}`);
+
+	events.linkSessions("ring-alias2", "ring-canon2");
+	events.emit("ring-canon2", { type: "user_prompt", text: "x" });
+	events.addClient("ring-alias2", fake, false, null);
+	check("a client on the alias holds the whole class open", events.dropSession("ring-canon2") === false);
+}
+
+// A credential must never reach a log line in a shape the redactor misses. Today only
+// request URLs are logged, but a future line that dumps a header block would otherwise print
+// the token in full, and a leaked log line is permanent.
+{
+	const { redactToken } = await import("../src/log.js");
+	const leaks = [
+		["query", "GET /api/events?token=SECRET123&sessionId=x"],
+		["bearer", "Authorization: Bearer SECRET123"],
+		["json", '{"token":"SECRET123"}'],
+		["bare config", "token = SECRET123"],
+		["colon form", "  token: SECRET123"],
+	];
+	for (const [shape, text] of leaks) {
+		check(`a token is redacted from a ${shape} line`, !/SECRET/.test(redactToken(text)), redactToken(text));
+	}
+	const real = "GET /api/sessions?limit=5&token=abc123def&foo=bar";
+	check("redaction keeps the rest of the request line readable",
+		/\/api\/sessions/.test(redactToken(real)) && /limit=5/.test(redactToken(real)) && /foo=bar/.test(redactToken(real)) && !/abc123/.test(redactToken(real)),
+		redactToken(real));
+	check("redaction is idempotent", redactToken(redactToken(real)) === redactToken(real), redactToken(redactToken(real)));
+}
+
+// The permission announce must name the rows the desk card shows. omp's approval dialog calls
+// `select(<Allow tool: …>, ["Approve", "Deny"])` and tests the reply as `value === "Approve"`, so
+// announcing the stock `Yes`/`No` would ask the wearer about words they cannot see.
+{
+	const { permissionRequestFrame } = await import("../src/frames.js");
+	const named = permissionRequestFrame("s", { toolName: "bash", description: "d", detail: "d", toolUseId: "t", labels: ["Approve", "Deny"] });
+	check("a permission frame announces the card's own rows",
+		JSON.stringify(named.options.map(o => o.text)) === JSON.stringify(["Approve", "Deny"]) &&
+		JSON.stringify(named.options.map(o => o.key)) === JSON.stringify(["allow", "deny"]),
+		JSON.stringify(named.options));
+	const stock = permissionRequestFrame("s", { toolName: "bash", description: "d", detail: "d", toolUseId: "t" });
+	check("with no card rows it falls back to the stock labels",
+		JSON.stringify(stock.options.map(o => o.text)) === JSON.stringify(["Yes", "No"]),
+		JSON.stringify(stock.options));
+	// A caller with anything other than two real labels must get the stock pair, not `{text: undefined}`
+	// (a one-element array) or a silently dropped third option (a longer one).
+	for (const [name, labels] of [
+		["a one-element array", ["Approve"]],
+		["a three-element array", ["Approve", "Deny", "Always"]],
+		["an empty-label pair", ["", "Deny"]],
+	]) {
+		const frame = permissionRequestFrame("s", { toolName: "bash", description: "d", detail: "d", toolUseId: "t", labels });
+		check(`a permission frame with ${name} falls back to the stock pair`,
+			JSON.stringify(frame.options.map(o => o.text)) === JSON.stringify(["Yes", "No"]),
+			JSON.stringify(frame.options));
+	}
+
+	const always = permissionRequestFrame("s", { toolName: "bash", description: "d", detail: "d", toolUseId: "t", allowAlways: true, labels: ["Approve", "Deny"] });
+	check("allowAlways is offered between the two decisions",
+		JSON.stringify(always.options.map(o => o.key)) === JSON.stringify(["allow", "allowAlways", "deny"]),
+		JSON.stringify(always.options.map(o => o.key)));
+	check("the allowAlways row names the card's own positive word",
+		JSON.stringify(always.options.map(o => o.text)) === JSON.stringify(["Approve", "Approve, always allow this tool", "Deny"]),
+		JSON.stringify(always.options.map(o => o.text)));
 }
 
 await bridge.close();

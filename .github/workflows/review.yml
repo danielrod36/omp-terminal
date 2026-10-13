@@ -1,0 +1,119 @@
+name: Review
+
+# Posts an automated review comment on every pull request.
+#
+# The reviewer runs the repo's own agent against the PR diff. It is deliberately
+# read-only: the diff, the docs, and the source are all it gets, and it may not
+# write. Findings are advisory — branch protection requires a green `check` and
+# a human approval, so this never becomes the merge gate by itself.
+#
+# If no model credential is configured the job is skipped rather than failing,
+# so forks and a secrets-less clone still get a clean run.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  agent-review:
+    runs-on: ubuntu-latest
+    # Fork PRs cannot read the repository's secrets, so the credential check
+    # below would always fail for them; skip early instead. Same-repository PRs
+    # proceed and the step below no-ops when no model key is configured.
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    env:
+      ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+
+      - name: Check for a model credential
+        id: creds
+        run: |
+          if [ -z "$ZHIPU_API_KEY$ANTHROPIC_API_KEY$OPENAI_API_KEY" ]; then
+            echo "have=no" >> "$GITHUB_OUTPUT"
+            echo "No model credential configured; skipping agent review."
+          else
+            echo "have=yes" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install omp
+        if: steps.creds.outputs.have == 'yes'
+        run: npm install -g @oh-my-pi/pi-coding-agent
+
+      - name: Collect the diff
+        if: steps.creds.outputs.have == 'yes'
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch --no-tags origin "$BASE_REF"
+          git diff "origin/$BASE_REF...HEAD" > /tmp/pr.diff
+          wc -l /tmp/pr.diff
+
+      - name: Review
+        if: steps.creds.outputs.have == 'yes'
+        id: review
+        # Read-only tools: the reviewer inspects, it never edits the checkout.
+        run: |
+          {
+            echo 'You are reviewing a pull request on a small Node bridge that'
+            echo 'adapts the Even G2 smart-glasses Terminal Mode wire protocol to'
+            echo 'the oh-my-pi (omp) agent.'
+            echo
+            echo 'The diff is at /tmp/pr.diff. The repo docs are docs/PROTOCOL.md'
+            echo '(the two wire contracts) and CONTRIBUTING.md (house rules).'
+            echo
+            echo 'Prioritise, in order:'
+            echo '1. Bugs that would break the app silently. The lens firmware drops'
+            echo '   unknown frames with no error, so a malformed frame is invisible.'
+            echo '   Check the paint-and-persist sequence, sessionId presence, and'
+            echo '   that emitted frame types are ones the firmware knows.'
+            echo '2. Auth or secret-handling regressions.'
+            echo '3. Unhandled error paths that could hang or wedge a session.'
+            echo '4. Anything the tests do not cover that this diff changes.'
+            echo
+            echo 'Report only findings you can point at in the diff. For each: the'
+            echo 'file and line, what breaks, and the concrete failure. Say plainly'
+            echo 'when the diff looks correct. Do not restate the diff. Do not'
+            echo 'speculate about code you did not read.'
+          } > /tmp/prompt.txt
+
+          omp -p --no-session --auto-approve \
+            --no-extensions --no-skills --no-rules \
+            --tools read,grep,glob \
+            "$(cat /tmp/prompt.txt)" > /tmp/review.md 2>/tmp/review.err || true
+
+          if [ ! -s /tmp/review.md ]; then
+            echo "Reviewer produced no output." > /tmp/review.md
+            tail -20 /tmp/review.err || true
+          fi
+          cat /tmp/review.md
+
+      - name: Post the review as a comment
+        if: steps.creds.outputs.have == 'yes'
+        run: |
+          {
+            echo "### Automated review"
+            echo
+            cat /tmp/review.md
+            echo
+            echo "---"
+            echo "_Advisory only. Merging requires the \`check\` job and a human approval._"
+          } > /tmp/comment.md
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file /tmp/comment.md

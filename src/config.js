@@ -1,7 +1,10 @@
 import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { join, resolve } from "node:path";
-import { loadStore, saveStore } from "./store.js";
+import { CONFIG_PATH, loadStore, saveStore } from "./store.js";
+import { createLogger } from "./log.js";
+
+const log = createLogger("config");
 
 /** Built-in defaults, mirrored by the startup banner and README. */
 export const DEFAULTS = {
@@ -35,7 +38,7 @@ export const DEFAULTS = {
  *
  * Precedence mirrors the stock even-terminal: CLI flag > environment > default.
  */
-export function loadConfig({ env = process.env, flags = {}, store = loadStore() } = {}) {
+export function loadConfig({ env = process.env, flags = {}, store = loadStore(), storePath = CONFIG_PATH } = {}) {
 	const pick = (flagValue, envKey, fallback) => {
 		if (flagValue !== undefined) return flagValue;
 		const fromEnv = envKey ? env[envKey] : undefined;
@@ -51,6 +54,14 @@ export function loadConfig({ env = process.env, flags = {}, store = loadStore() 
 	// The store is what keeps the glasses paired across restarts; without it a
 	// fresh random token silently invalidates every stored pairing.
 	let token = pick(flags.token, "BRIDGE_TOKEN", undefined);
+	// An empty token must never reach the server: `(bearer ?? query) === token` would then
+	// authorize `?token=` from any caller, and `--token "$VAR"` with VAR unset is exactly
+	// how an empty value arrives. The env path already falls back on ""; treat the flag the
+	// same way, so the failure is "generated a token" rather than "auth is off".
+	if (token === "") {
+		log.warn("ignoring an empty BRIDGE_TOKEN/--token; generating one instead");
+		token = undefined;
+	}
 	let tokenSource = token !== undefined ? (flags.token !== undefined ? "flag" : "env") : undefined;
 	if (token === undefined && typeof store.token === "string" && store.token) {
 		token = store.token;
@@ -59,7 +70,10 @@ export function loadConfig({ env = process.env, flags = {}, store = loadStore() 
 	if (token === undefined) {
 		token = randomBytes(16).toString("hex");
 		tokenSource = "generated";
-		saveStore({ token });
+		// Persist to the SAME store we were handed. Writing the default path regardless
+		// silently rotated the credential for any caller that passed its own store — the
+		// test suite did exactly that and replaced the host's real pairing token.
+		saveStore({ token }, storePath);
 	}
 	const cwd = resolve(pick(flags.cwd, "PROJECT_DIR", process.cwd()));
 

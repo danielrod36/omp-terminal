@@ -44,8 +44,10 @@ function truncate(value, max) {
 }
 
 function summarizeTool(name, args) {
-	const formatter = TOOL_SUMMARY[name];
-	if (formatter) return formatter(args ?? {});
+	// Own key: a bare `TOOL_SUMMARY[name]` resolves inherited members for a tool omp reported as
+	// `toString`/`constructor`, and the summary would then read "[object Undefined]".
+	const formatter = Object.hasOwn(TOOL_SUMMARY, name) ? TOOL_SUMMARY[name] : undefined;
+	if (typeof formatter === "function") return formatter(args ?? {});
 	return name;
 }
 
@@ -77,8 +79,8 @@ export class OwnedSession {
 		this.state = "idle";
 		this.title = "";
 		this.lastActivity = Date.now();
-		this.lastAssistantText = "";
 		this.pendingDialogs = new Map();
+		this.toolSummaries = new Map();
 		this.statsTimer = null;
 		this.turnStart = 0;
 		this.turnUsage = { inputTokens: 0, outputTokens: 0, costUsd: 0, durationMs: 0 };
@@ -99,7 +101,12 @@ export class OwnedSession {
 		});
 		this.rpc.on("frame", frame => this.#handleFrame(frame));
 		this.rpc.on("exit", () => {
-			this.state = "idle";
+			// A child that dies mid-turn never sends `session_settled`; without
+			// this the lens keeps painting "working" for a process that is gone.
+			if (this.state !== "idle") {
+				this.state = "idle";
+				emit(this.id, statusFrame(this.id, "idle", this.provider));
+			}
 			this.#stopStats();
 		});
 		await this.rpc.start();
@@ -185,7 +192,6 @@ export class OwnedSession {
 				const text = forDisplay(event.content ?? this.textBuffer);
 				this.textBuffer = "";
 				if (!text) break;
-				this.lastAssistantText = text;
 				for (const out of textCommitFrames(this.id, text, {
 					provider: this.provider,
 					usage: this.turnUsage,
@@ -200,12 +206,16 @@ export class OwnedSession {
 	}
 
 	#handleToolStart(frame) {
+		const summary = summarizeTool(frame.toolName, frame.args);
+		// `tool_execution_end` carries no `args`, so remember the start summary
+		// for the finish frame instead of shipping an empty one.
+		if (frame.toolCallId && summary) this.toolSummaries?.set(frame.toolCallId, summary);
 		emit(
 			this.id,
 			toolStartFrame(this.id, {
 				name: frame.toolName,
 				toolId: frame.toolCallId,
-				summary: summarizeTool(frame.toolName, frame.args),
+				summary,
 			}),
 		);
 		if (frame.toolName === "todo") {
@@ -215,23 +225,36 @@ export class OwnedSession {
 	}
 
 	#handleToolEnd(frame) {
+		const summary = this.toolSummaries?.get(frame.toolCallId) ?? summarizeTool(frame.toolName, frame.args);
+		if (frame.toolCallId) this.toolSummaries?.delete(frame.toolCallId);
 		emit(
 			this.id,
 			toolEndFrame(this.id, {
 				name: frame.toolName,
 				toolId: frame.toolCallId,
-				summary: summarizeTool(frame.toolName, frame.args),
+				summary,
 			}),
 		);
 	}
 
 	#handleDialog(frame) {
 		const { id, method } = frame;
-		this.pendingDialogs.set(id, frame);
+		// Only dialogs the wearer can answer are tracked: host-chrome frames
+		// (setWidget/setTitle/notify/setStatus/open_url) and `cancel` have no
+		// answer, so storing them would grow the map for the process lifetime.
+		const answerable = method === "select" || method === "confirm" || method === "ask" || method === "input" || method === "editor";
+		if (answerable) this.pendingDialogs.set(id, frame);
+		else this.pendingDialogs.delete(id);
 		if (method === "select") {
 			const lines = String(frame.title ?? "").split("\n");
 			const toolName = lines[0]?.replace(/^Allow tool:\s*/, "") ?? "tool";
 			this.state = "awaiting";
+			// omp sends the offered choices as plain label strings, and `answerPermission` replies
+			// with the label it chose, so the announce names those same rows rather than a hardcoded
+			// pair. Only an EXACT two-row offer is mirrored: for any other count the reply's
+			// `"Approve"`/`"Deny"` would not match what was offered, so the stock pair is safer than
+			// announcing the second of three options as the deny row.
+			const offered = offeredRows(frame);
 			emit(
 				this.id,
 				permissionRequestFrame(this.id, {
@@ -239,6 +262,7 @@ export class OwnedSession {
 					description: lines.slice(1).join(" ").trim(),
 					detail: lines.slice(1).join("\n"),
 					toolUseId: id,
+					...(offered.length === 2 ? { labels: [offered[0], offered[1]] } : {}),
 				}),
 			);
 			emit(this.id, statusFrame(this.id, "awaiting", this.provider));
@@ -268,6 +292,18 @@ export class OwnedSession {
 			this.state = "awaiting";
 			emit(this.id, questionFrame(this.id, [{ id, question: String(frame.title ?? ""), options: [] }], id));
 			emit(this.id, statusFrame(this.id, "awaiting", this.provider));
+			return;
+		}
+		if (method === "cancel") {
+			// omp settled the dialog itself (abort or timeout) and asks the host
+			// to close it. Drop the pending entry and stop reporting `awaiting`,
+			// or the wearer is left staring at a card that can no longer be
+			// answered.
+			this.pendingDialogs.delete(frame.targetId);
+			if (this.state === "awaiting") {
+				this.state = "busy";
+				emit(this.id, statusFrame(this.id, "busy", this.provider));
+			}
 			return;
 		}
 		// setWidget / setTitle / notify / setStatus / open_url are host chrome;
@@ -312,12 +348,19 @@ export class OwnedSession {
 		const entry = [...this.pendingDialogs.entries()].find(
 			([, frame]) => frame.method === "select" || frame.method === "confirm",
 		);
-		if (!entry) return false;
+		if (!entry) return { ok: false, reason: "no permission card is on screen" };
 		const [id, frame] = entry;
 		this.pendingDialogs.delete(id);
 		const approved = decision === "allow" || decision === "allowAlways";
-		if (frame.method === "select") this.rpc.respond(id, { value: approved ? "Approve" : "Deny" });
-		else this.rpc.respond(id, { confirmed: approved });
+		if (frame.method === "select") {
+			// Reply with the row omp OFFERED, not a hardcoded pair: the announce mirrors
+			// `frame.options`, so replying with words the card did not present is a different answer
+			// than the one announced (and omp matches the value against the options it sent).
+			const offered = offeredRows(frame);
+			const fallback = approved ? "Approve" : "Deny";
+			const value = offered.length === 2 ? offered[approved ? 0 : 1] : fallback;
+			this.rpc.respond(id, { value });
+		} else this.rpc.respond(id, { confirmed: approved });
 		emit(
 			this.id,
 			permissionResultFrame(this.id, {
@@ -328,26 +371,47 @@ export class OwnedSession {
 		);
 		this.state = "busy";
 		emit(this.id, statusFrame(this.id, "busy", this.provider));
-		return true;
+		// Same contract as the attach session: `{ ok, reason }`, never a bare boolean, so the
+		// server can tell "nothing is pending" from "the card could not be answered".
+		return { ok: true };
 	}
 
 	async answerQuestion(rawAnswer) {
-		const entry = [...this.pendingDialogs.entries()].find(([, frame]) => frame.method === "ask");
-		if (!entry) return false;
+		// `ask` carries structured questions; `input`/`editor` are free-text
+		// dialogs whose answer goes back as `{value}`. Both arrive as
+		// `extension_ui_request`, and both arm the app's question UI, so an
+		// unanswered `input` would otherwise wedge the session in `awaiting`.
+		const entry = [...this.pendingDialogs.entries()].find(
+			([, frame]) => frame.method === "ask" || frame.method === "input" || frame.method === "editor",
+		);
+		if (!entry) return { ok: false, reason: "no question card is on screen" };
 		const [id, frame] = entry;
 		this.pendingDialogs.delete(id);
-		const picked = parseQuestionAnswer(rawAnswer, frame.questions ?? []);
-		this.rpc.respond(id, { answers: picked });
-		emit(
-			this.id,
-			questionAnswerFrame(
+		if (frame.method === "ask") {
+			const picked = parseQuestionAnswer(rawAnswer, frame.questions ?? []);
+			this.rpc.respond(id, { answers: picked });
+			emit(
 				this.id,
-				Object.fromEntries(picked.map(answer => [answer.id, answer.selectedOptions.join(", ")])),
-			),
-		);
+				questionAnswerFrame(
+					this.id,
+					Object.fromEntries(
+						picked.map(answer => [
+							answer.id,
+							[...(answer.selectedOptions ?? []), answer.customInput].filter(Boolean).join(", "),
+						]),
+					),
+				),
+			);
+		} else {
+			const value = typeof rawAnswer === "string" ? rawAnswer : JSON.stringify(rawAnswer ?? "");
+			this.rpc.respond(id, { value });
+			emit(this.id, questionAnswerFrame(this.id, { [String(frame.title ?? "input")]: value }));
+		}
 		this.state = "busy";
 		emit(this.id, statusFrame(this.id, "busy", this.provider));
-		return true;
+		// `{ ok }`, matching the attach session: the route reads `.ok`, so a bare `true` reported
+		// every SUCCESSFUL answer as a 409 while the answer had already been applied.
+		return { ok: true };
 	}
 
 	async interrupt() {
@@ -366,49 +430,81 @@ export class OwnedSession {
 
 /**
  * The Even App answers a question by POSTing a JSON object keyed by the
- * question text, a bare dictation string, or an option label/index. Extract
- * one selection set per question id, the shape `ask` expects.
+ * question text, a bare dictation string, or an option label/index.
+ *
+ * Returns one `{ id, selectedOptions, customInput }` per question — the exact
+ * shape omp's `ask` dialog validates (`parseAskDialogResponse`). A dictated
+ * label that matches no option MUST travel as `customInput`: omp rejects an
+ * unknown label in `selectedOptions` outright ("selected unknown option") and
+ * the whole tool call fails.
  */
 export function parseQuestionAnswer(rawAnswer, questions) {
-	const answers = [];
 	const text = typeof rawAnswer === "string" ? rawAnswer.trim() : rawAnswer;
-	if (text && typeof text === "object" && !Array.isArray(text)) {
-		for (const [index, question] of questions.entries()) {
-			const value = text[question.question] ?? text[question.id] ?? text[String(index)];
-			if (value !== undefined) {
-				answers.push({ id: question.id, selectedOptions: normalizeSelection(value, question) });
-			}
-		}
-		if (answers.length) return answers;
-	}
+	const keyed = text && typeof text === "object" && !Array.isArray(text) ? text : null;
+	// Own keys only, matching the attach path: a bare `keyed[name]` walks the prototype chain, so a
+	// question the AGENT named `toString`/`constructor` resolved an inherited function and sent it
+	// to omp as `customInput: "function toString() { [native code] }"` for a row the wearer picked.
+	const own = name => (keyed && Object.hasOwn(keyed, name) ? keyed[name] : undefined);
+	const answers = [];
 	for (const [index, question] of questions.entries()) {
-		answers.push({
-			id: question.id,
-			selectedOptions: normalizeSelection(index === 0 ? text : "", question),
-		});
+		let value;
+		if (keyed) value = own(question.question) ?? own(question.id) ?? own(String(index));
+		else value = index === 0 ? text : "";
+		answers.push({ id: question.id, ...normalizeAnswer(value, question) });
 	}
 	return answers;
 }
 
-function normalizeSelection(value, question) {
-	const values = Array.isArray(value) ? value : [value];
+/** One dictated value → the option labels it names, plus any free text. */
+function normalizeAnswer(value, question) {
 	const options = question.options ?? [];
-	return values
-		.filter(item => item !== undefined && item !== null && item !== "")
-		.map(item => {
-			const asString = String(item).trim();
-			const byLabel = options.find(option => option.label === asString);
-			if (byLabel) return byLabel.label;
-			// A dictated digit is 1-based ("say a number" on the option rows);
-			// 0 also accepts the first option for a wearer who counts from zero.
-			if (/^\d+$/.test(asString)) {
-				const numeric = Number(asString);
-				if (numeric >= 1 && numeric <= options.length) return options[numeric - 1].label;
-				if (numeric === 0 && options.length > 0) return options[0].label;
-			}
-			const byCase = options.find(option => option.label.toLowerCase() === asString.toLowerCase());
-			return byCase ? byCase.label : asString;
-		});
+	const values = (Array.isArray(value) ? value : [value]).filter(
+		item => item !== undefined && item !== null && item !== "",
+	);
+	const selectedOptions = [];
+	const custom = [];
+	for (const item of values) {
+		const asString = String(item).trim();
+		if (!asString) continue;
+		const matched = matchOption(asString, options);
+		if (matched) {
+			if (!selectedOptions.includes(matched)) selectedOptions.push(matched);
+		} else if (!custom.includes(asString)) {
+			// Free text is not a selectable row; it belongs in customInput.
+			custom.push(asString);
+		}
+	}
+	// omp validates `customInput` as a string when present — a `null` would be
+	// rejected outright, so the field is omitted unless there is free text.
+	if (custom.length === 0) return { selectedOptions };
+	return { selectedOptions, customInput: custom.join(" ") };
+}
+
+/**
+ * The offered rows of an approve/deny `select`, as label strings.
+ *
+ * One helper because the ANNOUNCE and the REPLY must agree: the reply names a row by the same
+ * index the announce showed the wearer, so a different normalization on either side (an extra
+ * filter, say) announces one pair and answers with another. Empty rows are dropped here rather
+ * than at one call site, so both see the same length and the same order.
+ */
+function offeredRows(frame) {
+	return Array.isArray(frame.options) ? frame.options.map(String).filter(label => label.length > 0) : [];
+}
+
+/** Match a dictated string to an offered option: label, 1-based index, or case. */
+function matchOption(asString, options) {
+	const byLabel = options.find(option => option.label === asString);
+	if (byLabel) return byLabel.label;
+	// A dictated digit is 1-based ("say a number" on the option rows);
+	// 0 also accepts the first option for a wearer who counts from zero.
+	if (/^\d+$/.test(asString)) {
+		const numeric = Number(asString);
+		if (numeric >= 1 && numeric <= options.length) return options[numeric - 1].label;
+		if (numeric === 0 && options.length > 0) return options[0].label;
+	}
+	const byCase = options.find(option => option.label.toLowerCase() === asString.toLowerCase());
+	return byCase ? byCase.label : null;
 }
 
 function todoProgress(args) {

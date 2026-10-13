@@ -57,9 +57,18 @@ omp v18.8.7, binary on `PATH`; source types from the packed npm tarball.
 |---|---|
 | Pane identifies an omp TUI | `tmux list-panes -F '#{pane_current_command}'` -> `omp` |
 | Prompt injection | `tmux send-keys -t <s> -l '<text>'` then separate `send-keys -t <s> Enter`; the trailing literal arg otherwise gets typed |
-| Approval box shape | live `capture-pane`: `╭─ Allow tool: write ─…` with `❯ Approve` / `Deny` |
+| Approval box shape | live `capture-pane` (18.8.9): `╭─ Allow tool: write ─…` with `U+F054 Approve` focused and `Deny` beneath |
 | `Enter` approves | live: file written after `Enter` |
+| `ask` dialog box | live `capture-pane` (18.8.9): `╭─ Ask ─…`, question row, then option rows `\uf054 \uf10c <label>`; markers are private-use glyphs that vary by Nerd Font revision (`U+F096`, `U+F10C` observed) |
+| Option focus marker | `\uf054` on the highlighted row; a live `Down` moves it |
+| Multi vs single `ask` | the key-hint bar says `toggle` for multi-select and `select` for single — the primary signal. A controlled A/B on one host and font shows the unchecked marker ALSO differs by mode: single renders `U+F10C`, multi renders `U+F096` (7 rows each in `/tmp/absingle.txt` vs `/tmp/abmulti.txt`, both focused on `U+F054`). That is the parser's second signal, consulted only when no hint bar is present. Verified through the bridge: `multiSelect: true` reaches the app frame and answering it lands "Blue selected" in the desk TUI |
+| Checked row | toggling a row with `Space` swaps its marker `U+F096` → `U+F14A`; markers are private-use glyphs and the focus glyph is always `U+F054` |
+| Multi toggle | live: `Space` marks the row checked (`U+F14A`), `Enter` submits |
 | Transcript location | `<sessionsRoot>/<encoded-cwd>/*.jsonl`; `pane_current_path` -> encoded bucket |
+| Byte-exact rewind | transcript line offsets are bytes, not JS string indices; `#resumeOffset` scans the raw Buffer |
+| Two TUIs share one transcript | live: a second `omp` in the same cwd resumed the existing session file; both panes appended to it (one `session` record, both prompts in one file) |
+| No fd to disambiguate a pane | live: `/proc/<pid>/fd` for both `omp` processes listed no transcript; omp opens it per append |
+| A closed dialog leaves an echo | the transcript keeps a borderless `╭─── Ask 1 questions ─…` box after the dialog closes; it must not be read as an open dialog (no `\uf054` focus row, no framed option rows) |
 
 ## Bridge self-test
 
