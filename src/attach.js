@@ -1049,9 +1049,16 @@ function readAskBoxes(lines) {
 			// would inflate the option list and shift every dictated index.
 			if (!row.focus && knownFont && !row.known) continue;
 			if (!row.focus && !family(row.marker)) continue;
-			// The `Other (type your own)` row is the free-text affordance, not one of
-			// the offered options.
-			if (/^Other \(type your own\)$/.test(row.label)) continue;
+			// The `Other (type your own)` row is the free-text affordance, not one of the offered
+			// options. The desk user can still PARK the highlight on it, and its physical position
+			// is what every cursor delta is measured from — dropping it without recording the
+			// focus left `focusRow` at -1, which rejected the whole box and made a dialog the desk
+			// was showing neither announced nor answerable. The row always renders last, so the
+			// position past the real options is also the correct base for a delta.
+			if (/^Other \(type your own\)$/.test(row.label)) {
+				if (row.focus) box.focusRow = box.options.length;
+				continue;
+			}
 			// A checked row renders U+F14A where an unchecked one renders U+F096
 			// (measured live: toggling a row with Space swaps those two).
 			const checkedMarker = row.marker === "\uf14a";
@@ -1183,10 +1190,23 @@ function resolveRequestedIndex(text, options) {
 	// A digit ordinal (`2nd`, `3rd`) counts as its cardinal: left alone it matched neither the
 	// digit test nor the word map, so "the 2nd one" carried exactly one numeric token — the `one`
 	// — and submitted row 1, the same wrong-row failure the spelled ordinals had.
-	const numericTokens = tokens
-		.map(token => token.replace(/^(\d+)(?:st|nd|rd|th)$/, "$1"))
-		.filter(token => /^\d+$/.test(token) || token in words);
+	// Digit ordinals normalize to their cardinal FIRST, so both the token list and the count below
+	// see the same spelling (`2nd` and `2` must not look like two different words).
+	const normalized = tokens.map(token => token.replace(/^(\d+)(?:st|nd|rd|th)$/, "$1"));
+	const numericTokens = normalized.filter(token => /^\d+$/.test(token) || token in words);
 	if (numericTokens.length === 1) {
+		// The lone number is a row index only when every OTHER word is dictation filler. `one` is
+		// also an English pronoun, so "the green one" over Red/Green/Blue matched no label, saw a
+		// single numeric token, and Entered row 1 — the wearer said green and Red was submitted.
+		// Refusing here is the same rule the file already applies to every other ambiguous
+		// dictation: better to decline than to answer a row that was never named.
+		const chrome = new Set([
+			"the", "a", "an", "option", "number", "row", "choice", "pick", "choose", "select", "press",
+			"answer", "go", "with", "it", "please", "for", "me", "is", "of", "and", "to", "first",
+			"second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
+		]);
+		const rest = normalized.filter(token => !numericTokens.includes(token) && !chrome.has(token));
+		if (rest.length > 0) return -1;
 		const numeric = /^\d+$/.test(numericTokens[0]) ? Number(numericTokens[0]) : words[numericTokens[0]];
 		if (numeric >= 1 && numeric <= options.length) return numeric - 1;
 	}

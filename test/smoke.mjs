@@ -213,6 +213,18 @@ console.log("parseQuestionAnswer unit checks");
 	check("bare index resolves to the second option", byIndex[0]?.selectedOptions[0] === "Blue");
 	const byCase = parseQuestionAnswer("red", questions);
 	check("case-insensitive label resolves", byCase[0]?.selectedOptions[0] === "Red");
+	// Own keys only on the OWNED path too: a bare `keyed[name]` walks the prototype chain, so a
+	// question the agent named `toString` resolved `Object.prototype.toString` and sent omp
+	// `customInput: "function toString() { [native code] }"` for a row the wearer actually picked.
+	const protoQuestions = [{ id: "toString", question: "toString", options: [{ label: "Red" }, { label: "Blue" }] }];
+	const byIndexProto = parseQuestionAnswer({ 0: "Blue" }, protoQuestions);
+	check("an index-keyed answer resolves for a question named toString",
+		JSON.stringify(byIndexProto[0]?.selectedOptions) === JSON.stringify(["Blue"]) && byIndexProto[0]?.customInput === undefined,
+		JSON.stringify(byIndexProto[0]));
+	const byTextProto = parseQuestionAnswer({ toString: "Blue" }, protoQuestions);
+	check("a text-keyed answer resolves for a question named toString",
+		JSON.stringify(byTextProto[0]?.selectedOptions) === JSON.stringify(["Blue"]) && byTextProto[0]?.customInput === undefined,
+		JSON.stringify(byTextProto[0]));
 }
 
 // The dialog routes read `.ok` off the answer result, so BOTH session types must return

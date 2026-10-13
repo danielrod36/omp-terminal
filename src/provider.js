@@ -439,10 +439,14 @@ export class OwnedSession {
 export function parseQuestionAnswer(rawAnswer, questions) {
 	const text = typeof rawAnswer === "string" ? rawAnswer.trim() : rawAnswer;
 	const keyed = text && typeof text === "object" && !Array.isArray(text) ? text : null;
+	// Own keys only, matching the attach path: a bare `keyed[name]` walks the prototype chain, so a
+	// question the AGENT named `toString`/`constructor` resolved an inherited function and sent it
+	// to omp as `customInput: "function toString() { [native code] }"` for a row the wearer picked.
+	const own = name => (keyed && Object.hasOwn(keyed, name) ? keyed[name] : undefined);
 	const answers = [];
 	for (const [index, question] of questions.entries()) {
 		let value;
-		if (keyed) value = keyed[question.question] ?? keyed[question.id] ?? keyed[String(index)];
+		if (keyed) value = own(question.question) ?? own(question.id) ?? own(String(index));
 		else value = index === 0 ? text : "";
 		answers.push({ id: question.id, ...normalizeAnswer(value, question) });
 	}

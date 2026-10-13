@@ -480,6 +480,8 @@ console.log("answer paths");
 		["Red", ["Red", "Blue", "Green"], 2, 0],
 		["2", ["Red", "Blue", "Green"], 0, 1],
 		["blue", ["Red", "Blue", "Green"], 0, 1],
+		["option two", ["Red", "Blue", "Green"], 0, 1],
+		["the 3rd", ["Red", "Blue", "Green"], 0, 2],
 		["http 2", ["HTTP/2", "HTTP/1.1"], 0, 0],
 		["1.1", ["HTTP/2", "HTTP/1.1"], 0, 1],
 	]) {
@@ -704,6 +706,40 @@ console.log("answer paths");
 				JSON.stringify({ got, keys }));
 		}
 
+		// The desk cursor can rest on the `Other (type your own)` row, which is the free-text
+		// affordance rather than an option. Dropping that row without recording its position left
+		// `focusRow` at -1 and rejected the WHOLE box, so a dialog the desk was showing was neither
+		// announced nor answerable.
+		const otherFocused = [
+			"╭─ Ask ─╮",
+			"│  colours    Submit",
+			"│ Which colour do you prefer?",
+			"├────────",
+			"│     Red",
+			"│     Green",
+			"│     Blue",
+			"│    Other (type your own)",
+			"│",
+			"├────────",
+			"│   select · 󰌑 submit · ↑/↓ move",
+			"╰────────",
+		].join("\n");
+		const of = readDialogFromPane(otherFocused);
+		check("focus parked on the free-text row still yields the dialog",
+			of?.kind === "question" && of?.focusedIndex === 3 && JSON.stringify(of?.options.map(o => o.label)) === JSON.stringify(["Red", "Green", "Blue"]),
+			JSON.stringify({ kind: of?.kind, focus: of?.focusedIndex, options: of?.options?.map(o => o.label) }));
+
+		// And the cursor arithmetic from that position reaches the named row.
+		session.capture = async () => otherFocused;
+		let fromOther = 3;
+		keys = [];
+		session.send = async key => { keys.push(key); if (key === "Down") fromOther += 1; if (key === "Up") fromOther -= 1; return true; };
+		const namedFromOther = await session.answerQuestion("Green");
+		check("answering from the free-text row lands on the named row",
+			Boolean(namedFromOther?.ok ?? namedFromOther) && fromOther === 1,
+			JSON.stringify({ namedFromOther, keys, fromOther }));
+		session.send = async key => { keys.push(key); return true; };
+
 		// A plain `keyed[prompt]` walks the prototype chain, so a question whose text is `toString`
 		// resolved `Object.prototype.toString` — an inherited FUNCTION that passed the null check
 		// and refused the answer with a nonsense reason. Own keys only.
@@ -713,6 +749,18 @@ console.log("answer paths");
 			const got = await session.answerQuestion({ unrelated: "Green" });
 			check(`a question named ${proto} does not resolve an inherited method`,
 				!(got?.ok ?? got) && !/function|\[/.test(String(got?.reason ?? "")) && keys.length === 0,
+				JSON.stringify({ got, keys }));
+		}
+
+		// `one` is also an English pronoun, so a labelled answer containing it must NOT be read as a
+		// row number: "the green one" over Red/Green/Blue matched no label, saw a single numeric
+		// token, and Entered row 1 — the wearer said green and Red was submitted.
+		for (const pronoun of ["the green one", "the last one", "the middle one", "a green one"]) {
+			session.capture = async () => questionPane;
+			keys = [];
+			const got = await session.answerQuestion(pronoun);
+			check(`a pronoun "one" dictation ("${pronoun}") is refused, not answered`,
+				!(got?.ok ?? got) && keys.length === 0,
 				JSON.stringify({ got, keys }));
 		}
 
