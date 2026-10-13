@@ -215,6 +215,48 @@ console.log("parseQuestionAnswer unit checks");
 	check("case-insensitive label resolves", byCase[0]?.selectedOptions[0] === "Red");
 }
 
+// The dialog routes read `.ok` off the answer result, so BOTH session types must return
+// `{ ok }`. A bare boolean makes a SUCCESSFUL answer report as a 409 while it was already
+// applied; the ask round-trip above only runs under a real omp child, so `--no-omp` (what CI
+// runs) could not catch it.
+console.log("dialog answer result shape");
+{
+	const { OwnedSession } = await import("../src/provider.js");
+	const { AttachSession } = await import("../src/attach.js");
+	const owned = new OwnedSession({ id: "shape", provider: "p", config: { sessionsRoot: "/tmp" } });
+	const attach = new AttachSession({ id: "shape", tmuxSession: "props", cwd: "/tmp", provider: "p", config: { sessionsRoot: "/tmp", tailIntervalMs: 500 }, transcriptPath: null });
+	// Nothing pending: a refusal, still shaped `{ ok, reason }`.
+	for (const [name, session] of [["owned", owned], ["attach", attach]]) {
+		const refused = await session.answerQuestion("x");
+		check(`an ${name} session refuses a question answer with a reason`,
+			refused?.ok === false && typeof refused.reason === "string" && refused.reason.length > 0,
+			JSON.stringify(refused));
+		const refusedPerm = await session.answerPermission("allow");
+		check(`an ${name} session refuses a permission answer with a reason`,
+			refusedPerm?.ok === false && typeof refusedPerm.reason === "string" && refusedPerm.reason.length > 0,
+			JSON.stringify(refusedPerm));
+	}
+
+	// The reply must name the row omp OFFERED, not a hardcoded pair: the announce mirrors
+	// `frame.options`, so a reply using other words answers a question the card did not ask.
+	const ownedReplies = new OwnedSession({ id: "shape-reply", provider: "p", config: { sessionsRoot: "/tmp" } });
+	const sent = [];
+	ownedReplies.rpc = { respond: (_id, value) => sent.push(value), send: async () => {} };
+	for (const [offered, decision, want] of [
+		[["Approve", "Deny"], "allow", "Approve"],
+		[["Approve", "Deny"], "deny", "Deny"],
+		[["Yes", "No"], "allow", "Yes"],
+		[["Yes", "No"], "deny", "No"],
+	]) {
+		sent.length = 0;
+		ownedReplies.pendingDialogs.set("d", { method: "select", title: "Allow tool: b", options: offered });
+		await ownedReplies.answerPermission(decision);
+		check(`a permission reply names the offered row (${offered.join("/")} ${decision})`,
+			sent[0]?.value === want,
+			JSON.stringify(sent[0]));
+	}
+}
+
 console.log("tunnel provider parsing");
 {
 	const { PROVIDERS, providerNames } = await import("../src/expose.js");

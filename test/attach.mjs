@@ -194,6 +194,37 @@ console.log("pane scraping");
 				!announced2.some(frame => frame.type === "permission_request"),
 				JSON.stringify(announced2.map(f => f.type)));
 			dropSession(id2);
+
+			// A ONE-row partial render: the parser's partial branch yields a single focused row, so
+			// the announce must not index `options[1]` (it threw into the poll's catch AFTER the
+			// signature was stored, which suppressed any re-announce). It must also not report the
+			// wearer as `awaiting` a dialog that was never announced.
+			const announced3 = [];
+			const fake3 = {
+				write(chunk) { for (const line of String(chunk).split("\n")) if (line.startsWith("data: ")) { try { announced3.push(JSON.parse(line.slice(6))); } catch {} } },
+				end() {}, on() {}, once() {}, setHeader() {}, flushHeaders() {}, writableEnded: false, destroyed: false,
+			};
+			const id3 = "announce-one-row";
+			addClient(id3, fake3, false, null);
+			const session3 = new AttachSession({
+				id: id3, tmuxSession: "props", cwd: "/tmp", provider: "p",
+				config: { sessionsRoot: "/tmp", tailIntervalMs: 500 }, transcriptPath: null,
+			});
+			session3.capture = async () => [
+				"╭─ Allow tool: bash ───────────╮",
+				"│ Command: x                   │",
+				"│  \uf054 Approve                  │",
+				"│ ↑/↓ navigate select cancel   │",
+				"╰──────────────────────────────╯",
+			].join("\n");
+			session3.send = async () => true;
+			await session3.start();
+			await new Promise(resolve => setTimeout(resolve, 700));
+			session3.timer && clearInterval(session3.timer);
+			check("a one-row partial card neither announces nor reports awaiting",
+				!announced3.some(frame => frame.type === "permission_request") && session3.state === "idle",
+				JSON.stringify({ types: announced3.map(f => f.type), state: session3.state }));
+			dropSession(id3);
 		}
 
 		const wk = readDialogFromPane(wrappedKeywordless);

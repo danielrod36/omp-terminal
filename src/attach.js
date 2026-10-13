@@ -409,17 +409,25 @@ export class AttachSession {
 			return;
 		}
 		this.lastDialogSignature = signature;
-		this.state = "awaiting";
+		// `awaiting` is set per-branch, AFTER the announce is known to be possible: reporting the
+		// wearer as waiting on a dialog that was never announced (an unreadable permission card)
+		// leaves the app armed for an answer nobody will be asked for.
 		if (dialog.kind === "permission") {
 			// A card whose rows could not be read has nothing truthful to announce. Its rows are
 			// real on the desk — only the bar has not painted — so announcing the stock pair would
 			// name words that are not on the card, the mismatch this whole path exists to avoid.
 			// The signature above is already recorded, so the card re-announces with its own rows
 			// as soon as the bar paints and the parse finds them.
-			if (dialog.options.length === 0) {
-				log.info(`attach ${this.id} permission card rows are not readable yet; announcing nothing`);
+			//
+			// The test is `!== 2`, not `=== 0`: a mid-repaint capture can yield exactly ONE focused
+			// row (the partial-render branch), and indexing `options[1]` there threw a TypeError
+			// into the poll's catch — after the signature was stored, so the card could not
+			// re-announce until the second row happened to paint.
+			if (dialog.options.length !== 2) {
+				log.info(`attach ${this.id} permission card shows ${dialog.options.length} row(s); announcing nothing`);
 				return;
 			}
+			this.state = "awaiting";
 			// `key` is the decision the app posts back; `text` is what the wearer reads. Mirror the
 			// card's own vocabulary: announcing words the desk does not show makes the wearer answer
 			// a question they cannot see. Labels are passed through verbatim, so a card saying
@@ -438,6 +446,7 @@ export class AttachSession {
 				sessionId: this.id,
 			});
 		} else {
+			this.state = "awaiting";
 			emit(
 				this.id,
 				questionFrame(

@@ -350,8 +350,15 @@ export class OwnedSession {
 		const [id, frame] = entry;
 		this.pendingDialogs.delete(id);
 		const approved = decision === "allow" || decision === "allowAlways";
-		if (frame.method === "select") this.rpc.respond(id, { value: approved ? "Approve" : "Deny" });
-		else this.rpc.respond(id, { confirmed: approved });
+		if (frame.method === "select") {
+			// Reply with the row omp OFFERED, not a hardcoded pair: the announce mirrors
+			// `frame.options`, so replying with words the card did not present is a different answer
+			// than the one announced (and omp matches the value against the options it sent).
+			const offered = Array.isArray(frame.options) ? frame.options.map(String) : [];
+			const fallback = approved ? "Approve" : "Deny";
+			const value = offered.length === 2 ? offered[approved ? 0 : 1] : fallback;
+			this.rpc.respond(id, { value });
+		} else this.rpc.respond(id, { confirmed: approved });
 		emit(
 			this.id,
 			permissionResultFrame(this.id, {
@@ -400,7 +407,9 @@ export class OwnedSession {
 		}
 		this.state = "busy";
 		emit(this.id, statusFrame(this.id, "busy", this.provider));
-		return true;
+		// `{ ok }`, matching the attach session: the route reads `.ok`, so a bare `true` reported
+		// every SUCCESSFUL answer as a 409 while the answer had already been applied.
+		return { ok: true };
 	}
 
 	async interrupt() {
