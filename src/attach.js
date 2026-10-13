@@ -707,17 +707,12 @@ export function readDialogFromPane(pane) {
 			if (/^[╰└]/.test(trimmed)) break;
 			body.push(trimmed.replace(/^[│|]\s?/, "").replace(/\s?[│|]$/, "").trimEnd());
 		}
-		// The choices are the run of choice rows directly above the hint bar, so the hint bar is the
-		// FIRST line at or after them that reads like one — not the last keyword-bearing line in the
-		// card. Taking the last made a body line that merely mentions `select` (a shell command, a
-		// diff) or a WRAPPED hint bar move the boundary below the real choices, which emptied the
-		// option list: the card then answered blind. Scanning forward from each candidate choice run
-		// keeps a mention harmless because the run itself is what locates the bar.
 		const looksLikeHint = content => /\bnavigate\b|\bselect\b|\bcancel\b|\btoggle\b|\bsubmit\b/.test(content);
 		// Locate the MENU first: the longest run of choice rows in the card. Anchoring on the choices
-		// rather than on the first keyword is what keeps a body mention harmless, and taking the
-		// whole run is what survives a hint bar that WRAPS: the bar's first fragment may carry no
-		// keyword at all, so a scan keyed to the bar alone would stop above the real choices.
+		// rather than on the first keyword is what keeps a body mention harmless (a shell command, a
+		// diff), and taking the whole run is what survives a hint bar that WRAPS: the bar's first
+		// fragment may carry no keyword at all, so a scan keyed to the bar alone would stop above
+		// the real choices and empty the option list — the card then answered blind.
 		let menuEnd = -1;
 		let menuStart = -1;
 		let best = -1;
