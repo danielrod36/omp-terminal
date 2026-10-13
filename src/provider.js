@@ -248,8 +248,10 @@ export class OwnedSession {
 			const toolName = lines[0]?.replace(/^Allow tool:\s*/, "") ?? "tool";
 			this.state = "awaiting";
 			// omp sends the offered choices as plain label strings, and `answerPermission` replies
-			// with the label it chose, so the announce must name those same rows rather than a
-			// hardcoded pair.
+			// with the label it chose, so the announce names those same rows rather than a hardcoded
+			// pair. Only an EXACT two-row offer is mirrored: for any other count the reply's
+			// `"Approve"`/`"Deny"` would not match what was offered, so the stock pair is safer than
+			// announcing the second of three options as the deny row.
 			const offered = Array.isArray(frame.options) ? frame.options.map(String).filter(Boolean) : [];
 			emit(
 				this.id,
@@ -258,7 +260,7 @@ export class OwnedSession {
 					description: lines.slice(1).join(" ").trim(),
 					detail: lines.slice(1).join("\n"),
 					toolUseId: id,
-					...(offered.length >= 2 ? { labels: [offered[0], offered[1]] } : {}),
+					...(offered.length === 2 ? { labels: [offered[0], offered[1]] } : {}),
 				}),
 			);
 			emit(this.id, statusFrame(this.id, "awaiting", this.provider));
@@ -373,7 +375,7 @@ export class OwnedSession {
 		const entry = [...this.pendingDialogs.entries()].find(
 			([, frame]) => frame.method === "ask" || frame.method === "input" || frame.method === "editor",
 		);
-		if (!entry) return false;
+		if (!entry) return { ok: false, reason: "no question card is on screen" };
 		const [id, frame] = entry;
 		this.pendingDialogs.delete(id);
 		if (frame.method === "ask") {

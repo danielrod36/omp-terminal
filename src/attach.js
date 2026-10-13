@@ -411,24 +411,28 @@ export class AttachSession {
 		this.lastDialogSignature = signature;
 		this.state = "awaiting";
 		if (dialog.kind === "permission") {
+			// A card whose rows could not be read has nothing truthful to announce. Its rows are
+			// real on the desk — only the bar has not painted — so announcing the stock pair would
+			// name words that are not on the card, the mismatch this whole path exists to avoid.
+			// The signature above is already recorded, so the card re-announces with its own rows
+			// as soon as the bar paints and the parse finds them.
+			if (dialog.options.length === 0) {
+				log.info(`attach ${this.id} permission card rows are not readable yet; announcing nothing`);
+				return;
+			}
+			// `key` is the decision the app posts back; `text` is what the wearer reads. Mirror the
+			// card's own vocabulary: announcing words the desk does not show makes the wearer answer
+			// a question they cannot see. Labels are passed through verbatim, so a card saying
+			// `Allow`/`Cancel` is announced as such rather than as the stock pair.
 			emit(this.id, {
 				type: "permission_request",
 				toolName: dialog.toolName,
 				description: dialog.body.replace(/\n/g, " ").slice(0, 200),
 				detail: dialog.body,
 				toolUseId: `attach-${this.id}`,
-				// `key` is the decision the app posts back; `text` is what the wearer reads. The
-				// stock server pairs Claude Code's `Yes`/`No` labels with these keys, but omp's card
-				// says `Approve`/`Deny` — announcing different words than the desk shows makes the
-				// wearer answer a question they cannot see. Mirror the card's own vocabulary, falling
-				// back to the stock labels only when the card named something else again.
-				// Any label the card actually showed is passed through verbatim. Recognising only
-				// `Approve`/`Yes` meant a card saying `Allow`/`Cancel` — or the same pair in the other
-				// order — was announced with the stock words instead, which is the very mismatch this
-				// fixes for omp's vocabulary. The stock pair is only for a card that showed no rows.
 				options: [
-					{ text: dialog.options[0]?.label ?? "Yes", key: "allow" },
-					{ text: dialog.options[1]?.label ?? "No", key: "deny" },
+					{ text: dialog.options[0].label, key: "allow" },
+					{ text: dialog.options[1].label, key: "deny" },
 				],
 				suggestions: null,
 				sessionId: this.id,
@@ -538,20 +542,28 @@ export class AttachSession {
 	async answerQuestion(rawAnswer) {
 		const pane = await this.capture();
 		const dialog = readDialogFromPane(pane);
-		if (!dialog || dialog.kind !== "question") return false;
+		// Same contract as `answerPermission`: `{ ok, reason }`, never a bare boolean, so the route
+		// can tell "nothing is pending" from "the card is there but the answer failed" — the
+		// distinction the permission route already reports.
+		if (!dialog || dialog.kind !== "question") return { ok: false, reason: "no question card is on screen" };
 		const options = dialog.options ?? [];
 		// The app names an answer three ways and cannot know whether this session is owned or
 		// attached, so both paths accept the same shapes. A keyed object maps the question to its
 		// answer, and `parseQuestionAnswer` looks the key up by question text, by question id, and
-		// by the question's index — `"0"` and `0` alike — with the value possibly an ARRAY for a
-		// multi-select. Handling only the prompt and `"0"` silently dropped the rest, and
-		// stringifying an array produced `"Green,Blue"`, which matches no label.
+		// by the question's index — with the value possibly an ARRAY for a multi-select. Handling
+		// only the prompt and index zero silently dropped the rest, and stringifying an array
+		// produced `"Green,Blue"`, which matches no label.
+		//
+		// A question dialog's `toolName` is the constant `"ask"`, not an id, so it is NOT a key
+		// worth trying: no client can know it as a question's name, and the scraped pane carries
+		// no id to match. `keyed[0]` and `keyed["0"]` are one property slot, since a numeric key
+		// is coerced to a string.
 		const keyed = rawAnswer && typeof rawAnswer === "object" && !Array.isArray(rawAnswer) ? rawAnswer : null;
 		const picks = keyed
-			? [keyed[dialog.prompt], keyed[dialog.toolName], keyed["0"], keyed[0]].find(hit => hit !== undefined && hit !== null)
+			? [keyed[dialog.prompt], keyed[0]].find(hit => hit !== undefined && hit !== null)
 			: rawAnswer;
 		const values = (Array.isArray(picks) ? picks : [picks]).filter(item => item !== undefined && item !== null && item !== "");
-		if (values.length === 0) return false;
+		if (values.length === 0) return { ok: false, reason: "the answer was empty" };
 		// An attached dialog can only be driven one row at a time, so every named option must be
 		// honoured — silently acting on the first would leave a multi-select half answered.
 		const wanted = [];
@@ -559,18 +571,24 @@ export class AttachSession {
 			// A dictated answer names an option by label ("Blue") or by number ("two" → 2),
 			// relative to the option rows as rendered.
 			const index = resolveRequestedIndex(String(value).trim(), options);
-			if (index < 0) return false;
+			if (index < 0) return { ok: false, reason: `the card offers no row matching ${JSON.stringify(String(value).trim())}` };
 			if (!wanted.includes(index)) wanted.push(index);
 		}
-		if (dialog.multi) return this.#toggleMulti(dialog, wanted);
-		return this.#selectSingle(dialog, wanted[0]);
+		// Naming several rows on a SINGLE-select card means at least one of them was misdictated,
+		// so it is refused like any other ambiguous dictation rather than silently taking the
+		// first — the desk would otherwise submit a row the wearer never settled on.
+		if (!dialog.multi) {
+			if (wanted.length !== 1) return { ok: false, reason: "more than one row was named for a single-select card" };
+			return this.#selectSingle(dialog, wanted[0]);
+		}
+		return this.#toggleMulti(dialog, wanted);
 	}
 
 	/** Single-select: move the highlight to the row, then submit. */
 	async #selectSingle(dialog, wanted) {
 		const steps = wanted - dialog.focusedIndex;
-		if (!(await this.#moveCursor(steps))) return false;
-		if (!(await this.send("Enter", { enter: false }))) return false;
+		if (!(await this.#moveCursor(steps))) return { ok: false, reason: "the cursor could not be moved to the selected row" };
+		if (!(await this.send("Enter", { enter: false }))) return { ok: false, reason: "the key could not be delivered to the desk" };
 		return this.#answered();
 	}
 
@@ -587,15 +605,15 @@ export class AttachSession {
 		// on (rows [1,2] moved +1 then +2, landing on row 3).
 		let cursor = dialog.focusedIndex;
 		for (const wanted of wantedRows) {
-			if (!(await this.#moveCursor(wanted - cursor))) return false;
+			if (!(await this.#moveCursor(wanted - cursor))) return { ok: false, reason: "the cursor could not be moved to the selected row" };
 			cursor = wanted;
 			// `Space` toggles, so sending it to a row that is already checked would silently
 			// uncheck the desk user's selection.
 			const alreadyChecked = (dialog.checked ?? []).includes(wanted);
-			if (!alreadyChecked && !(await this.send("Space", { enter: false }))) return false;
+			if (!alreadyChecked && !(await this.send("Space", { enter: false }))) return { ok: false, reason: "the key could not be delivered to the desk" };
 		}
-		if (!(await this.#moveCursor(dialog.focusedIndex - cursor))) return false;
-		if (!(await this.send("Enter", { enter: false }))) return false;
+		if (!(await this.#moveCursor(dialog.focusedIndex - cursor))) return { ok: false, reason: "the cursor could not be returned to the desk's row" };
+		if (!(await this.send("Enter", { enter: false }))) return { ok: false, reason: "the key could not be delivered to the desk" };
 		return this.#answered();
 	}
 

@@ -123,11 +123,78 @@ console.log("pane scraping");
 			"│ ↑/↓ to choose then press                                                     │",
 			"│ select                                                                       │",
 		]);
-		// The announce must name the rows the CARD shows, not a fixed Yes/No pair: the wearer
-		// answers by voice using words they can see.
-		check("an Approve/Deny card is announced with its own vocabulary",
-			JSON.stringify(readDialogFromPane(wrappedKeywordless)?.options.map(o => o.label)) === JSON.stringify(["Approve", "Deny"]),
-			JSON.stringify(readDialogFromPane(wrappedKeywordless)?.options.map(o => o.label)));
+		// The announce itself must name the rows the CARD shows, not a fixed Yes/No pair: the
+		// wearer answers by voice using words they can see. Driven through the real `emit` path
+		// with a fake SSE client, because asserting on `readDialogFromPane` alone — as this check
+		// used to — only re-tests the parse and never touches the announce.
+		{
+			const { AttachSession } = await import("../src/attach.js");
+			const { addClient, dropSession } = await import("../src/events.js");
+			const announced = [];
+			const fake = {
+				write(chunk) { for (const line of String(chunk).split("\n")) if (line.startsWith("data: ")) { try { announced.push(JSON.parse(line.slice(6))); } catch {} } },
+				end() {}, on() {}, once() {}, setHeader() {}, flushHeaders() {}, writableEnded: false, destroyed: false,
+			};
+			const id = "announce-vocab";
+			addClient(id, fake, false, null);
+			const session = new AttachSession({
+				id, tmuxSession: "props", cwd: "/tmp", provider: "p",
+				config: { sessionsRoot: "/tmp", tailIntervalMs: 500 }, transcriptPath: null,
+			});
+			// A `Yes`/`No` card is the one vocabulary that differs from the announce's own default
+			// pair, so it is what proves the announce is not hardcoding: `Approve`/`Deny` would look
+			// identical to a fallback that always emitted it. The parser accepts only these two
+			// vocabularies, so a `Yes`/`No` card is the whole space of "not the default".
+			session.capture = async () => [
+				"╭─ Allow tool: bash ───────────╮",
+				"│ Command: x                   │",
+				"│  \uf054 Yes                    │",
+				"│    No                       │",
+				"│ ↑/↓ navigate select cancel   │",
+				"╰──────────────────────────────╯",
+			].join("\n");
+			session.send = async () => true;
+			// The poll timer lives in `start()`, not the constructor.
+			await session.start();
+			// The poll runs on the session's own timer, so one tick is enough — no private access.
+			await new Promise(resolve => setTimeout(resolve, 700));
+			session.timer && clearInterval(session.timer);
+			const perm = announced.find(frame => frame.type === "permission_request");
+			check("the announce names the card's own rows, not a fixed pair",
+				JSON.stringify(perm?.options?.map(o => o.text)) === JSON.stringify(["Yes", "No"]) &&
+					JSON.stringify(perm?.options?.map(o => o.key)) === JSON.stringify(["allow", "deny"]),
+				JSON.stringify(perm?.options ?? announced.map(f => f.type)));
+			dropSession(id);
+
+			// And an unreadable card — rows painted, bar not yet — announces NOTHING rather than
+			// naming the stock pair while the desk shows its real rows.
+			const announced2 = [];
+			const fake2 = {
+				write(chunk) { for (const line of String(chunk).split("\n")) if (line.startsWith("data: ")) { try { announced2.push(JSON.parse(line.slice(6))); } catch {} } },
+				end() {}, on() {}, once() {}, setHeader() {}, flushHeaders() {}, writableEnded: false, destroyed: false,
+			};
+			const id2 = "announce-unreadable";
+			addClient(id2, fake2, false, null);
+			const session2 = new AttachSession({
+				id: id2, tmuxSession: "props", cwd: "/tmp", provider: "p",
+				config: { sessionsRoot: "/tmp", tailIntervalMs: 500 }, transcriptPath: null,
+			});
+			session2.capture = async () => [
+				"╭─ Allow tool: bash ───────────╮",
+				"│ Command: x                   │",
+				"│  \uf054 Approve                  │",
+				"│    Deny                      │",
+				"╰──────────────────────────────╯",
+			].join("\n");
+			session2.send = async () => true;
+			await session2.start();
+			await new Promise(resolve => setTimeout(resolve, 700));
+			session2.timer && clearInterval(session2.timer);
+			check("a card whose rows are unreadable announces nothing, not the stock pair",
+				!announced2.some(frame => frame.type === "permission_request"),
+				JSON.stringify(announced2.map(f => f.type)));
+			dropSession(id2);
+		}
 
 		const wk = readDialogFromPane(wrappedKeywordless);
 		check("a keywordless first bar fragment still yields the choices",
@@ -524,6 +591,21 @@ console.log("answer paths");
 				JSON.stringify({ got, keys }));
 		}
 
+		// Naming several rows on a SINGLE-select card is a misdictation, not a choice: at least one
+		// of them is wrong, so it is refused like any other ambiguous dictation rather than
+		// silently submitting the first.
+		session.capture = async () => questionPane;
+		keys = [];
+		const twoOnSingle = await session.answerQuestion(["Green", "Blue"]);
+		check("two rows named on a single-select card is refused, not first-won",
+			!(twoOnSingle?.ok ?? twoOnSingle) && keys.length === 0,
+			JSON.stringify({ twoOnSingle, keys }));
+		keys = [];
+		const repeatOnSingle = await session.answerQuestion(["Green", "Green"]);
+		check("the same row named twice on a single-select card still answers",
+			Boolean(repeatOnSingle?.ok ?? repeatOnSingle) && keys.includes("Enter"),
+			JSON.stringify({ repeatOnSingle, keys }));
+
 		// A multi-select ARRAY must visit every named row, and the cursor must be TRACKED between
 		// them — computing each move from the dialog's snapshot focus sent the second row to the
 		// wrong place (rows [1,2] moved +1 then +2, landing on row 3). The mock below models the
@@ -571,7 +653,9 @@ console.log("answer paths");
 	// path, which would Enter a row the dictation never clearly named.
 	{
 		const ambiguous = await trial({ labels: ["HTTP/2", "HTTP/2 (restated)"], dictation: "http 2" });
-		check("ambiguous label match refuses instead of Entering a row", ambiguous.answered === false, JSON.stringify({ answered: ambiguous.answered, keys: ambiguous.sends }));
+		check("ambiguous label match refuses instead of Entering a row",
+			ambiguous.answered?.ok === false && typeof ambiguous.answered.reason === "string",
+			JSON.stringify({ answered: ambiguous.answered, keys: ambiguous.sends }));
 		const unambiguous = await trial({ labels: ["HTTP/2", "HTTP/1.1"], dictation: "http 2" });
 		check("unambiguous label match still resolves", unambiguous.answered?.ok === true && unambiguous.pane.focus === 0);
 	}
@@ -779,12 +863,16 @@ console.log("answer paths");
 
 	for (const dictation of ["s", "zz", "nope"]) {
 		const result = await trial({ labels: ["Red", "Blue"], dictation });
-		check(`short/unknown "${dictation}" is refused`, result.answered === false && result.state !== "busy", JSON.stringify({ answered: result.answered, state: result.state }));
+		check(`short/unknown "${dictation}" is refused`,
+			result.answered?.ok === false && typeof result.answered.reason === "string" && result.state !== "busy",
+			JSON.stringify({ answered: result.answered, state: result.state }));
 	}
 
 	for (const [name, failAt] of [["first key", 0], ["second key", 1], ["the submit key", 2]]) {
 		const result = await trial({ labels: ["Red", "Blue", "Green"], dictation: "Green", sendFailsAt: failAt });
-		check(`send failure on the ${name} does not report an answer`, result.answered === false && result.state !== "busy", JSON.stringify({ answered: result.answered, state: result.state }));
+		check(`send failure on the ${name} does not report an answer`,
+			result.answered?.ok === false && /could not be delivered|moved/.test(result.answered.reason) && result.state !== "busy",
+			JSON.stringify({ answered: result.answered, state: result.state }));
 	}
 }
 

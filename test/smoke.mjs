@@ -527,6 +527,19 @@ console.log("sse ring lifecycle");
 	check("with no card rows it falls back to the stock labels",
 		JSON.stringify(stock.options.map(o => o.text)) === JSON.stringify(["Yes", "No"]),
 		JSON.stringify(stock.options));
+	// A caller with anything other than two real labels must get the stock pair, not `{text: undefined}`
+	// (a one-element array) or a silently dropped third option (a longer one).
+	for (const [name, labels] of [
+		["a one-element array", ["Approve"]],
+		["a three-element array", ["Approve", "Deny", "Always"]],
+		["an empty-label pair", ["", "Deny"]],
+	]) {
+		const frame = permissionRequestFrame("s", { toolName: "bash", description: "d", detail: "d", toolUseId: "t", labels });
+		check(`a permission frame with ${name} falls back to the stock pair`,
+			JSON.stringify(frame.options.map(o => o.text)) === JSON.stringify(["Yes", "No"]),
+			JSON.stringify(frame.options));
+	}
+
 	const always = permissionRequestFrame("s", { toolName: "bash", description: "d", detail: "d", toolUseId: "t", allowAlways: true, labels: ["Approve", "Deny"] });
 	check("allowAlways is offered between the two decisions",
 		JSON.stringify(always.options.map(o => o.key)) === JSON.stringify(["allow", "allowAlways", "deny"]),

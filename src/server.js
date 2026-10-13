@@ -598,8 +598,8 @@ export function createBridge(config) {
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
 			const session = await resolveAnswerable(sessionId).catch(() => dropIfDead(getLive(sessionId)));
 			if (!session) return sendJson(res, 404, { error: "Session not found" });
-			const accepted = await session.answerQuestion(answer ?? "skip");
-			if (!accepted) return sendJson(res, 409, { error: "the question could not be answered from this card" });
+			const answered = await session.answerQuestion(answer ?? "skip");
+			if (!answered.ok) return sendJson(res, 409, { error: answered.reason });
 			return sendJson(res, 200, { ok: true });
 		}
 
