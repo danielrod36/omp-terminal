@@ -625,13 +625,14 @@ export class AttachSession {
 			const alreadyChecked = (dialog.checked ?? []).includes(wanted);
 			if (!alreadyChecked && !(await this.send("Space", { enter: false }))) return { ok: false, reason: "the key could not be delivered to the desk" };
 		}
-		// Submit from the last row that was TOGGLED, not from the desk's original row. Restoring the
-		// desk cursor is the tidy thing to do, but when that row is `Other (type your own)` the
-		// free-text affordance, `Enter` there opens the custom-input editor on the live dialog
-		// instead of submitting — verified against a real omp 18.10.1 pane — so the answer would
-		// never be delivered and the dialog would wedge. A toggled row is always a real option.
+		// Restore the desk's own row before submitting, EXCEPT when that row is not a real option —
+		// i.e. `Other (type your own)`, the free-text affordance. `Enter` there opens the
+		// custom-input editor on the live dialog instead of submitting (verified against a real omp
+		// 18.10.1 pane), so the answer would never be delivered and the dialog would wedge. In that
+		// one case the last TOGGLED row is the submit target, which is always a real option.
 		const deskRow = dialog.focusedIndex;
-		const submitFrom = deskRow >= 0 && deskRow < dialog.options.length ? deskRow : wantedRows[wantedRows.length - 1];
+		const isRealOption = deskRow >= 0 && deskRow < dialog.options.length;
+		const submitFrom = isRealOption ? deskRow : wantedRows[wantedRows.length - 1];
 		if (!(await this.#moveCursor(submitFrom - cursor))) return { ok: false, reason: "the cursor could not be moved to the submit row" };
 		if (!(await this.send("Enter", { enter: false }))) return { ok: false, reason: "the key could not be delivered to the desk" };
 		return this.#answered();
