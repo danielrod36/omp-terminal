@@ -52,6 +52,27 @@ export class AttachSession {
 		this.lastDialogSignature = "";
 		/** Assistant record timestamps already painted, so a re-read never duplicates. */
 		this.seenAssistant = new Set();
+		/**
+		 * True when another live attachment already follows the given transcript.
+		 *
+		 * The session bucket is keyed by cwd, not by pane, and nothing in omp's artifacts ties a
+		 * transcript back to the pane that writes it — not the pane title, the process
+		 * environment, an open file descriptor, nor a column in agent.db or composer.db (all
+		 * checked against a live two-pane host). Two omp TUIs in ONE project directory therefore
+		 * share a bucket, and newest-wins re-resolution made both attachments follow whichever
+		 * pane wrote last: each painted the other's conversation, and answering one desk's
+		 * dialog could steer the other's.
+		 *
+		 * The bridge cannot tell which of two panes owns a file, but it can tell which files it
+		 * already follows. Refusing those stops the two attachments from sharing one transcript,
+		 * which is the failure that actually crossed conversations. What remains is a single
+		 * attachment in a shared bucket binding to the other pane's file when that file is the
+		 * bucket's newest — unattributable without an identity signal omp does not publish, so it
+		 * is left visible rather than guessed at.
+		 *
+		 * Injected by the server; unset, no path is ever claimed.
+		 */
+		this.isClaimed = null;
 	}
 
 	async start() {
@@ -128,6 +149,9 @@ export class AttachSession {
 	adoptTranscript(path) {
 		if (!path || path === this.transcriptPath) return;
 		if (!existsSync(path)) return;
+		// Another attachment already follows this file; its turns are not ours to
+		// paint (see `isClaimed`).
+		if (this.isClaimed?.(path)) return;
 		// Only adopt a file this pane could be writing: same bucket as the cwd,
 		// and newer than what we are currently following.
 		if (!path.startsWith(`${this.config.sessionsRoot}/${sessionDirName(this.cwd)}/`)) return;
@@ -210,6 +234,9 @@ export class AttachSession {
 		if (this.transcriptPath && existsSync(this.transcriptPath)) return;
 		const newest = newestTranscript(this.config, this.cwd);
 		if (!newest?.path) return;
+		// A sibling attachment already follows the newest file: wait for this pane
+		// to write one of its own rather than painting another pane's turns.
+		if (this.isClaimed?.(newest.path)) return;
 		try {
 			this.offset = statSync(newest.path).size;
 			this.transcriptPath = newest.path;

@@ -148,8 +148,30 @@ export function createBridge(config) {
 		return `tmux:${tmuxSession}`;
 	}
 
+	/**
+	 * True when a transcript is already followed by a DIFFERENT live attachment.
+	 *
+	 * Nothing in omp's artifacts ties a transcript to the pane that writes it, so a bridge with
+	 * two attachments in one cwd cannot tell which pane a new file belongs to — but it can tell
+	 * which files it is already tailing. Refusing those is what keeps the newest-wins
+	 * re-resolution from handing one pane another pane's turns.
+	 */
+	function claimPredicate(owner) {
+		return path => {
+			for (const other of attachRegistry.values()) {
+				if (other === owner) continue;
+				if (other.transcriptPath === path && !other.paneGone) return true;
+			}
+			return false;
+		};
+	}
+
 	function ensureAttached(entry) {
 		const existing = attachRegistry.get(entry.attach.tmuxSession);
+		// Every attachment must know which transcripts its siblings hold BEFORE any of them
+		// may adopt a path, or two attachments in one cwd race for the same file (see
+		// `isClaimed` in attach.js).
+		for (const attached of attachRegistry.values()) attached.isClaimed = claimPredicate(attached);
 		if (existing) {
 			// The pane may have started a NEW transcript since the attachment was
 			// created (a fresh TUI writes nothing until its first turn). Refreshing
@@ -164,8 +186,13 @@ export function createBridge(config) {
 			cwd: entry.cwd,
 			provider: config.providerLabel,
 			config,
-			transcriptPath: entry.attach.transcriptPath,
+			// The LISTING's transcript is the bucket's newest, which in a shared cwd may belong
+			// to the other pane. Start with no binding and let the claim-guarded resolution pick
+			// one, rather than latching a file a sibling already follows.
+			transcriptPath: null,
 		});
+		session.isClaimed = claimPredicate(session);
+		if (entry.attach.transcriptPath) session.adoptTranscript(entry.attach.transcriptPath);
 		attachRegistry.set(entry.attach.tmuxSession, session);
 		sessions.set(session.id, session);
 		// Polling follows the transcript and scrapes the pane for dialogs; it

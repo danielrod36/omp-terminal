@@ -756,6 +756,50 @@ console.log("answer paths");
 			session.send = async key => { keys.push(key); return true; };
 		}
 
+		// Two omp TUIs in ONE cwd share a session bucket, and nothing in omp's artifacts ties a
+		// transcript to the pane that writes it. Re-pointing at the bucket's newest file therefore
+		// let each attachment paint the other pane's conversation. A file a SIBLING attachment
+		// already follows is refused; a pane's own newer file is still adopted.
+		{
+			const fs = await import("node:fs");
+			const os = await import("node:os");
+			const path = await import("node:path");
+			const { sessionDirName: bucketName } = await import("../src/sessions.js");
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "attach-claim-"));
+			const cwd = "/tmp/attach-claim-proj";
+			const bucket = path.join(root, bucketName(cwd));
+			fs.mkdirSync(bucket, { recursive: true });
+			const record = text => JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text }], timestamp: "2026-01-01T00:00:00Z" } }) + "\n";
+			const minePath = path.join(bucket, "t1_ses_mine.jsonl");
+			const theirsPath = path.join(bucket, "t2_ses_theirs.jsonl");
+			fs.writeFileSync(minePath, record("MINE-ONE"));
+			fs.writeFileSync(theirsPath, record("THEIRS-ONE"));
+			const quiet = Date.now() / 1000 - 120;
+			fs.utimesSync(minePath, quiet, quiet);
+			fs.utimesSync(theirsPath, quiet + 60, quiet + 60);
+			const makeClaimable = (id, transcript) => {
+				const attached = new AttachSession({ id, tmuxSession: id, cwd, provider: "p", config: { sessionsRoot: root, tailIntervalMs: 100000 }, transcriptPath: transcript });
+				attached.capture = async () => "";
+				attached.send = async () => true;
+				return attached;
+			};
+			const paneA = makeClaimable("tmux:paneA", minePath);
+			const paneB = makeClaimable("tmux:paneB", theirsPath);
+			const registry = [paneA, paneB];
+			for (const owner of registry) owner.isClaimed = target => registry.some(other => other !== owner && other.transcriptPath === target && !other.paneGone);
+			paneA.adoptTranscript(theirsPath);
+			check("an attachment refuses a transcript a sibling already follows",
+				paneA.transcriptPath === minePath, paneA.transcriptPath);
+			// The pane's own new session must still be followed, or the tail goes stale.
+			const ownNew = path.join(bucket, "t3_ses_mine2.jsonl");
+			fs.writeFileSync(ownNew, record("MINE-TWO"));
+			fs.utimesSync(ownNew, quiet + 120, quiet + 120);
+			paneA.adoptTranscript(ownNew);
+			check("an attachment still adopts its pane's own newer transcript",
+				paneA.transcriptPath === ownNew, paneA.transcriptPath);
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+
 		// And the cursor arithmetic from that position reaches the named row.
 		session.capture = async () => otherFocused;
 		let fromOther = 3;
