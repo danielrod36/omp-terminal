@@ -416,6 +416,21 @@ console.log("answer paths");
 			noFocus.ok === false && /selected/.test(noFocus.reason) && keys.length === 0,
 			JSON.stringify({ noFocus, keys }));
 
+		// A MULTI card: its bar says `toggle`, which is what selects the multi path at all.
+		const multiPane = [
+			"╭─ Ask ─╮",
+			"│  colours    Submit",
+			"│ Which colours do you prefer?",
+			"├────────",
+			"│  \uf054 \uf096 Red",
+			"│    \uf096 Green",
+			"│    \uf096 Blue",
+			"│",
+			"├────────",
+			"│  \uf10c toggle · 󰌑 submit · ↑/↓ move",
+			"╰────────",
+		].join("\n");
+
 		// The app names a question answer three ways and cannot know whether the session is owned
 		// or attached, so both must accept the same three. A keyed object used to stringify to
 		// "[object Object]", match no option, and drop the wearer's answer.
@@ -508,6 +523,28 @@ console.log("answer paths");
 				!(got?.ok ?? got) && keys.length === 0,
 				JSON.stringify({ got, keys }));
 		}
+
+		// A multi-select ARRAY must visit every named row, and the cursor must be TRACKED between
+		// them — computing each move from the dialog's snapshot focus sent the second row to the
+		// wrong place (rows [1,2] moved +1 then +2, landing on row 3). The mock below models the
+		// cursor so an off-by-one shows up as a wrong row rather than as a plausible key list.
+		session.capture = async () => multiPane;
+		let cursor = 0;
+		keys = [];
+		session.send = async key => {
+			keys.push(key);
+			if (key === "Down") cursor += 1;
+			if (key === "Up") cursor -= 1;
+			return true;
+		};
+		const twoRows = await session.answerQuestion(["Green", "Blue"]);
+		// Green is row 1 and Blue row 2 from the focused row, so each is one step further down and
+		// the pair `Space` lands on each; the cursor then returns home before submitting.
+		check("a multi-select array toggles every named row and returns home",
+			Boolean(twoRows?.ok ?? twoRows) &&
+				JSON.stringify(keys) === JSON.stringify(["Down", "Space", "Down", "Space", "Up", "Up", "Enter"]) &&
+				cursor === 0,
+			JSON.stringify({ twoRows, keys, cursor }));
 
 		// The hint bar is a precondition, not decoration: a card caught mid-repaint can show the
 		// rows before the bar paints, and answering it would submit a row the wearer has not

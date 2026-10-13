@@ -581,20 +581,20 @@ export class AttachSession {
 	 * sequence is independent of any prior state.
 	 */
 	async #toggleMulti(dialog, wantedRows) {
-		// `Space` toggles, so sending it to a row that is already checked would silently uncheck
-		// the desk user's selection; each named row is visited once and only unchecked ones are
-		// toggled.
+		// A row may be visited out of order, so the cursor position is tracked here rather than
+		// read from `dialog.focusedIndex` — that is a snapshot taken before any of these moves, and
+		// subtracting it from every target sent the cursor to the wrong row from the second move
+		// on (rows [1,2] moved +1 then +2, landing on row 3).
+		let cursor = dialog.focusedIndex;
 		for (const wanted of wantedRows) {
-			if (!(await this.#moveCursor(wanted - dialog.focusedIndex))) return false;
+			if (!(await this.#moveCursor(wanted - cursor))) return false;
+			cursor = wanted;
+			// `Space` toggles, so sending it to a row that is already checked would silently
+			// uncheck the desk user's selection.
 			const alreadyChecked = (dialog.checked ?? []).includes(wanted);
 			if (!alreadyChecked && !(await this.send("Space", { enter: false }))) return false;
 		}
-		return this.#submitFrom(wantedRows[wantedRows.length - 1], dialog.focusedIndex);
-	}
-
-	/** Return the cursor to the row the desk had focused, then submit. */
-	async #submitFrom(row, homeRow) {
-		if (!(await this.#moveCursor(homeRow - row))) return false;
+		if (!(await this.#moveCursor(dialog.focusedIndex - cursor))) return false;
 		if (!(await this.send("Enter", { enter: false }))) return false;
 		return this.#answered();
 	}
