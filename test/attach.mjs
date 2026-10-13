@@ -130,9 +130,14 @@ console.log("pane scraping");
 		{
 			const { AttachSession } = await import("../src/attach.js");
 			const { addClient, dropSession } = await import("../src/events.js");
+			// The teardown lives on the response under this symbol; `dropSession` refuses while any
+			// client is attached, so a fake that is never disposed leaks its ring and heartbeat.
+			const DISPOSE = Symbol.for("omp-terminal.dispose");
 			const announced = [];
+			const waiters = [];
+			const record = frame => { announced.push(frame); for (const wake of waiters.splice(0)) wake(); };
 			const fake = {
-				write(chunk) { for (const line of String(chunk).split("\n")) if (line.startsWith("data: ")) { try { announced.push(JSON.parse(line.slice(6))); } catch {} } },
+				write(chunk) { for (const line of String(chunk).split("\n")) if (line.startsWith("data: ")) { try { record(JSON.parse(line.slice(6))); } catch {} } },
 				end() {}, on() {}, once() {}, setHeader() {}, flushHeaders() {}, writableEnded: false, destroyed: false,
 			};
 			const id = "announce-vocab";
@@ -156,14 +161,21 @@ console.log("pane scraping");
 			session.send = async () => true;
 			// The poll timer lives in `start()`, not the constructor.
 			await session.start();
-			// The poll runs on the session's own timer, so one tick is enough — no private access.
-			await new Promise(resolve => setTimeout(resolve, 700));
+			// Wait for the FRAME, not a fixed sleep: a fixed 700 ms races the 500 ms poll interval,
+			// and a late first tick would fail this on an empty list while making the
+			// announces-nothing check below pass for the wrong reason.
+			await new Promise(resolve => {
+				if (announced.some(frame => frame.type === "permission_request")) return resolve();
+				waiters.push(resolve);
+				setTimeout(resolve, 3000);
+			});
 			session.timer && clearInterval(session.timer);
 			const perm = announced.find(frame => frame.type === "permission_request");
 			check("the announce names the card's own rows, not a fixed pair",
 				JSON.stringify(perm?.options?.map(o => o.text)) === JSON.stringify(["Yes", "No"]) &&
 					JSON.stringify(perm?.options?.map(o => o.key)) === JSON.stringify(["allow", "deny"]),
 				JSON.stringify(perm?.options ?? announced.map(f => f.type)));
+			fake[DISPOSE]?.();
 			dropSession(id);
 
 			// And an unreadable card — rows painted, bar not yet — announces NOTHING rather than
@@ -193,6 +205,7 @@ console.log("pane scraping");
 			check("a card whose rows are unreadable announces nothing, not the stock pair",
 				!announced2.some(frame => frame.type === "permission_request"),
 				JSON.stringify(announced2.map(f => f.type)));
+			fake2[DISPOSE]?.();
 			dropSession(id2);
 
 			// A ONE-row partial render: the parser's partial branch yields a single focused row, so
@@ -224,6 +237,7 @@ console.log("pane scraping");
 			check("a one-row partial card neither announces nor reports awaiting",
 				!announced3.some(frame => frame.type === "permission_request") && session3.state === "idle",
 				JSON.stringify({ types: announced3.map(f => f.type), state: session3.state }));
+			fake3[DISPOSE]?.();
 			dropSession(id3);
 		}
 
@@ -677,6 +691,18 @@ console.log("answer paths");
 			const got = await session.answerQuestion(answer);
 			check(`a question refusal names its reason (${situation})`,
 				got?.ok === false && typeof got.reason === "string" && got.reason.length > 8 && keys.length === 0,
+				JSON.stringify({ got, keys }));
+		}
+
+		// A plain `keyed[prompt]` walks the prototype chain, so a question whose text is `toString`
+		// resolved `Object.prototype.toString` — an inherited FUNCTION that passed the null check
+		// and refused the answer with a nonsense reason. Own keys only.
+		for (const proto of ["toString", "constructor", "hasOwnProperty"]) {
+			session.capture = async () => questionPane.replace("Which colour do you prefer?", proto);
+			keys = [];
+			const got = await session.answerQuestion({ unrelated: "Green" });
+			check(`a question named ${proto} does not resolve an inherited method`,
+				!(got?.ok ?? got) && !/function|\[/.test(String(got?.reason ?? "")) && keys.length === 0,
 				JSON.stringify({ got, keys }));
 		}
 

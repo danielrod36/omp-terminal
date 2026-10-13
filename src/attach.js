@@ -568,8 +568,12 @@ export class AttachSession {
 		// no id to match. `keyed[0]` and `keyed["0"]` are one property slot, since a numeric key
 		// is coerced to a string.
 		const keyed = rawAnswer && typeof rawAnswer === "object" && !Array.isArray(rawAnswer) ? rawAnswer : null;
+		// Own keys only: a plain `keyed[prompt]` walks the prototype chain, so a question whose text
+		// is `toString`/`constructor`/`hasOwnProperty` resolved an inherited FUNCTION, which passed
+		// the null check and refused the answer with a nonsense reason.
+		const own = name => (keyed && Object.hasOwn(keyed, name) ? keyed[name] : undefined);
 		const picks = keyed
-			? [keyed[dialog.prompt], keyed[0]].find(hit => hit !== undefined && hit !== null)
+			? [own(dialog.prompt), own(0)].find(hit => hit !== undefined && hit !== null)
 			: rawAnswer;
 		const values = (Array.isArray(picks) ? picks : [picks]).filter(item => item !== undefined && item !== null && item !== "");
 		if (values.length === 0) return { ok: false, reason: "the answer was empty" };

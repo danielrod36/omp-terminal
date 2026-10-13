@@ -82,7 +82,10 @@ export function permissionRequestFrame(sessionId, { toolName, description, detai
 		? labels
 		: ["Yes", "No"];
 	const options = [{ text: pair[0], key: "allow" }];
-	if (allowAlways) options.push({ text: `Yes, always allow this tool`, key: "allowAlways" });
+	// The middle row keeps the card's own positive word rather than a hardcoded `Yes`: it is
+	// unreachable from any current caller, and a literal here would announce a word the card does
+	// not show the moment one started passing `allowAlways`.
+	if (allowAlways) options.push({ text: `${pair[0]}, always allow this tool`, key: "allowAlways" });
 	options.push({ text: pair[1], key: "deny" });
 	return {
 		type: "permission_request",

@@ -586,6 +586,9 @@ console.log("sse ring lifecycle");
 	check("allowAlways is offered between the two decisions",
 		JSON.stringify(always.options.map(o => o.key)) === JSON.stringify(["allow", "allowAlways", "deny"]),
 		JSON.stringify(always.options.map(o => o.key)));
+	check("the allowAlways row names the card's own positive word",
+		JSON.stringify(always.options.map(o => o.text)) === JSON.stringify(["Approve", "Approve, always allow this tool", "Deny"]),
+		JSON.stringify(always.options.map(o => o.text)));
 }
 
 await bridge.close();
