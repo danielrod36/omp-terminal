@@ -628,6 +628,27 @@ console.log("answer paths");
 				cursor === 0,
 			JSON.stringify({ twoRows, keys, cursor }));
 
+		// Every refusal must say WHICH refusal it is: the route forwards the reason to the client,
+		// and "nothing is pending" (do nothing) is not the same advice as "the card was not
+		// understood" (answer at the desk). A bare boolean could not tell them apart.
+		for (const [situation, pane, answer] of [
+			["no card at all", "plain text\nno dialog here", "x"],
+			["a permission card instead of a question", [
+				"╭─ Allow tool: bash ─╮", "│ Command: x │", "│  \uf054 Approve │", "│    Deny │",
+				"│ ↑/↓ navigate select cancel │", "╰────────────────────╯",
+			].join("\n"), "x"],
+			["an empty answer", questionPane, ""],
+			["a label no row carries", questionPane, "Purple"],
+			["two rows on a single-select card", questionPane, ["Green", "Blue"]],
+		]) {
+			session.capture = async () => pane;
+			keys = [];
+			const got = await session.answerQuestion(answer);
+			check(`a question refusal names its reason (${situation})`,
+				got?.ok === false && typeof got.reason === "string" && got.reason.length > 8 && keys.length === 0,
+				JSON.stringify({ got, keys }));
+		}
+
 		// The hint bar is a precondition, not decoration: a card caught mid-repaint can show the
 		// rows before the bar paints, and answering it would submit a row the wearer has not
 		// finished reading. Such a card must be unanswerable.
