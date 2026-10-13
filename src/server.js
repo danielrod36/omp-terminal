@@ -320,6 +320,23 @@ export function createBridge(config) {
 	 * listed pane — so a stale or mistyped id (exactly what a client retries after a child
 	 * crashed) left an idle `omp` process registered for the bridge's lifetime.
 	 */
+	/**
+	 * `resolveAnswerable` with the fallback and the logging every dialog route needs.
+	 *
+	 * A rejection here is the attach scan failing, not an absent session, so it is logged rather
+	 * than reported as a plain 404 — otherwise a live session looks unknown with no trace of why.
+	 * The `getLive` fallback still runs, so a concurrent adoption mid-scan stays answerable.
+	 */
+	async function adoptAnswerable(sessionId) {
+		try {
+			const adopted = await resolveAnswerable(sessionId);
+			if (adopted) return adopted;
+		} catch (error) {
+			log.warn(`could not adopt ${sessionId}: ${error.message}`);
+		}
+		return dropIfDead(getLive(sessionId));
+	}
+
 	async function resolveAnswerable(sessionId) {
 		const live = dropIfDead(getLive(sessionId));
 		if (live) return live;
@@ -582,7 +599,7 @@ export function createBridge(config) {
 			// session is in `sessions`. Without this a client answering from a freshly listed id got
 			// 404 "Session not found" for a session it had just been told about. Adopting must not
 			// SPAWN, though — see resolveAnswerable.
-			const session = await resolveAnswerable(sessionId).catch(() => dropIfDead(getLive(sessionId)));
+			const session = await adoptAnswerable(sessionId);
 			if (!session) return sendJson(res, 404, { error: "Session not found" });
 			// The refusal reason travels to the client: "nothing is pending" and "the card was not
 			// understood" are different situations, and only the first one means "do nothing".
@@ -596,7 +613,7 @@ export function createBridge(config) {
 			const { sessionId, answer } = body;
 			log.info(`question-response raw=${JSON.stringify(answer)?.slice(0, 200)} (sessionId=${sessionId ?? "-"})`);
 			if (!sessionId) return sendJson(res, 400, { error: "Missing 'sessionId'" });
-			const session = await resolveAnswerable(sessionId).catch(() => dropIfDead(getLive(sessionId)));
+			const session = await adoptAnswerable(sessionId);
 			if (!session) return sendJson(res, 404, { error: "Session not found" });
 			const answered = await session.answerQuestion(answer ?? "skip");
 			if (!answered.ok) return sendJson(res, 409, { error: answered.reason });
@@ -609,7 +626,7 @@ export function createBridge(config) {
 			// Adopt a listed desk pane, but never spawn: interrupting is about a session already
 			// running, and a freshly spawned child would have nothing to abort. Without the adopt,
 			// an id straight out of /api/sessions 404'd here while the dialog routes accepted it.
-			const session = (await resolveAnswerable(sessionId).catch(() => dropIfDead(getLive(sessionId)))) ?? dropIfDead(getLive(sessionId));
+			const session = await adoptAnswerable(sessionId);
 			if (!session) return sendJson(res, 404, { error: "Session not found" });
 			try {
 				await session.interrupt();
