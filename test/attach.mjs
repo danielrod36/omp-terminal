@@ -729,6 +729,33 @@ console.log("answer paths");
 			of?.kind === "question" && of?.focusedIndex === 3 && JSON.stringify(of?.options.map(o => o.label)) === JSON.stringify(["Red", "Green", "Blue"]),
 			JSON.stringify({ kind: of?.kind, focus: of?.focusedIndex, options: of?.options?.map(o => o.label) }));
 
+		// A MULTI-select answered while the cursor rests on the free-text row must not SUBMIT from
+		// it: on the live dialog `Enter` on that row opens the custom-input editor rather than
+		// submitting (verified against a real omp 18.10.1 pane), so the answer would never be
+		// delivered. Submission happens from the last toggled row instead.
+		{
+			const multiOther = [
+				"╭─ Ask ─╮", "│  colours    Submit", "│ Which colour do you prefer?", "├────────",
+				"│     Red", "│     Green", "│     Blue",
+				"│    Other (type your own)", "│", "├────────",
+				"│   toggle · 󰌑 submit · ↑/↓ move", "╰────────",
+			].join("\n");
+			let cursor = 3;
+			keys = [];
+			session.capture = async () => multiOther;
+			session.send = async key => {
+				keys.push(key);
+				if (key === "Down") cursor = Math.min(cursor + 1, 3);
+				if (key === "Up") cursor = Math.max(cursor - 1, 0);
+				return true;
+			};
+			const multiFromOther = await session.answerQuestion(["Green", "Blue"]);
+			check("a multi-select from the free-text row submits from a real row",
+				Boolean(multiFromOther?.ok ?? multiFromOther) && keys.includes("Enter") && cursor < 3,
+				JSON.stringify({ multiFromOther, keys, cursor }));
+			session.send = async key => { keys.push(key); return true; };
+		}
+
 		// And the cursor arithmetic from that position reaches the named row.
 		session.capture = async () => otherFocused;
 		let fromOther = 3;

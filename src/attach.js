@@ -625,7 +625,14 @@ export class AttachSession {
 			const alreadyChecked = (dialog.checked ?? []).includes(wanted);
 			if (!alreadyChecked && !(await this.send("Space", { enter: false }))) return { ok: false, reason: "the key could not be delivered to the desk" };
 		}
-		if (!(await this.#moveCursor(dialog.focusedIndex - cursor))) return { ok: false, reason: "the cursor could not be returned to the desk's row" };
+		// Submit from the last row that was TOGGLED, not from the desk's original row. Restoring the
+		// desk cursor is the tidy thing to do, but when that row is `Other (type your own)` the
+		// free-text affordance, `Enter` there opens the custom-input editor on the live dialog
+		// instead of submitting — verified against a real omp 18.10.1 pane — so the answer would
+		// never be delivered and the dialog would wedge. A toggled row is always a real option.
+		const deskRow = dialog.focusedIndex;
+		const submitFrom = deskRow >= 0 && deskRow < dialog.options.length ? deskRow : wantedRows[wantedRows.length - 1];
+		if (!(await this.#moveCursor(submitFrom - cursor))) return { ok: false, reason: "the cursor could not be moved to the submit row" };
 		if (!(await this.send("Enter", { enter: false }))) return { ok: false, reason: "the key could not be delivered to the desk" };
 		return this.#answered();
 	}
@@ -1204,6 +1211,9 @@ function resolveRequestedIndex(text, options) {
 			"the", "a", "an", "option", "number", "row", "choice", "pick", "choose", "select", "press",
 			"answer", "go", "with", "it", "please", "for", "me", "is", "of", "and", "to", "first",
 			"second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
+			// The verbs the ask dialog's own hint bar prints ("toggle · submit · ↑/↓ move"), so a
+			// wearer reading them aloud ("submit 2", "enter two") still names a row.
+			"submit", "enter", "toggle", "move", "then", "now",
 		]);
 		const rest = normalized.filter(token => !numericTokens.includes(token) && !chrome.has(token));
 		if (rest.length > 0) return -1;
