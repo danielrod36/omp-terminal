@@ -797,6 +797,30 @@ console.log("answer paths");
 			paneA.adoptTranscript(ownNew);
 			check("an attachment still adopts its pane's own newer transcript",
 				paneA.transcriptPath === ownNew, paneA.transcriptPath);
+			// The FIRST bind must start past the end of the file: `start()` promises the desk's
+			// history is not re-emitted, and rewinding there re-painted it. A SWAP may still
+			// rewind, because a turn can finish inside the poll interval and would be missed.
+			const freshTs = new Date().toISOString();
+			const firstBindPath = fs.readFileSync(minePath, "utf8")
+				? (() => {
+					const p2 = path.join(bucket, "t9_ses_first.jsonl");
+					fs.writeFileSync(p2, JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "HISTORY" }], timestamp: freshTs } }) + "\n");
+					return p2;
+				})()
+				: minePath;
+			const firstBind = makeClaimable("tmux:firstBind", null);
+			firstBind.isClaimed = () => false;
+			firstBind.adoptTranscript(firstBindPath);
+			check("a first bind starts past the end, re-emitting no history",
+				firstBind.offset === fs.statSync(firstBindPath).size,
+				`offset ${firstBind.offset} vs size ${fs.statSync(firstBindPath).size}`);
+			const swap = makeClaimable("tmux:swap", minePath);
+			swap.isClaimed = () => false;
+			swap.offset = 999999;
+			swap.adoptTranscript(firstBindPath);
+			check("a swap still rewinds to recover a turn that finished mid-poll",
+				swap.offset < fs.statSync(firstBindPath).size,
+				`offset ${swap.offset} vs size ${fs.statSync(firstBindPath).size}`);
 			fs.rmSync(root, { recursive: true, force: true });
 		}
 

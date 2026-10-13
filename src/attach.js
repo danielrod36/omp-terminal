@@ -158,9 +158,17 @@ export class AttachSession {
 		if (this.transcriptPath && this.#isOlderThan(path)) return;
 		// Resolve the new offset BEFORE committing the path: a file rotating away
 		// between the two would otherwise leave the new path with the old offset.
+		//
+		// A SWAP may rewind to the last assistant record, because the turn the wearer
+		// is waiting for can complete inside the poll interval and would otherwise be
+		// missed (see `#resumeOffset`). A FIRST bind must not: it has no earlier turn of
+		// its own to recover, and rewinding there re-paints the desk's existing history
+		// against `start()`'s "history is not re-emitted" contract — so it starts past
+		// the end, exactly as a caller-supplied path does at `start()`.
+		const swapping = Boolean(this.transcriptPath);
 		let offset;
 		try {
-			offset = this.#resumeOffset(path);
+			offset = swapping ? this.#resumeOffset(path) : statSync(path).size;
 		} catch {
 			return;
 		}
