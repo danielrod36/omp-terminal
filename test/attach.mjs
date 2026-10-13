@@ -444,7 +444,13 @@ console.log("answer paths");
 			// Keyed by the question text exactly as the pane renders it — the same key the app reads
 			// off the `user_question` frame it was sent.
 			["an object keyed by the question", { "Which colour do you prefer?": "Green" }, true],
-			["an object keyed by index", { 0: "Green" }, true],
+			// These three key by something OTHER than the scraped prompt, so they fail unless the
+			// lookup also tries the other forms `parseQuestionAnswer` accepts. Keying them by the
+			// prompt (as an earlier version of these cases did) tests nothing extra: the prompt
+			// lookup alone resolves them.
+			["an object keyed by numeric index", { 0: "Green" }, true],
+			["an object keyed by index string", { "0": "Green" }, true],
+			["an object whose value is an array", { "0": ["Green"] }, true],
 			["a label no row carries", "Purple", false],
 		]) {
 			session.capture = async () => questionPane;
@@ -475,6 +481,25 @@ console.log("answer paths");
 				Boolean(got?.ok ?? got) && keys.includes("Enter") && net === wantIndex,
 				JSON.stringify({ got, keys, net }));
 		}
+		// A DIGIT ordinal counts as its cardinal too, and the same mix rule applies.
+		for (const [dictated, wantIndex] of [["1st", 0], ["2nd", 1], ["3rd", 2]]) {
+			session.capture = async () => questionPane;
+			keys = [];
+			const got = await session.answerQuestion(dictated);
+			const net = keys.filter(k => k === "Down").length - keys.filter(k => k === "Up").length;
+			check(`the digit ordinal "${dictated}" names row ${wantIndex + 1}`,
+				Boolean(got?.ok ?? got) && keys.includes("Enter") && net === wantIndex,
+				JSON.stringify({ got, keys, net }));
+		}
+		for (const mixed of ["the 2nd one", "the 3rd one"]) {
+			session.capture = async () => questionPane;
+			keys = [];
+			const got = await session.answerQuestion(mixed);
+			check(`a digit-ordinal/cardinal mix ("${mixed}") is refused, not guessed`,
+				!(got?.ok ?? got) && keys.length === 0,
+				JSON.stringify({ got, keys }));
+		}
+
 		for (const mixed of ["the second one", "the third one"]) {
 			session.capture = async () => questionPane;
 			keys = [];

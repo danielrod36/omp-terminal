@@ -539,21 +539,31 @@ export class AttachSession {
 		const pane = await this.capture();
 		const dialog = readDialogFromPane(pane);
 		if (!dialog || dialog.kind !== "question") return false;
-		// The app may name the answer three ways, and it cannot know whether this session is
-		// owned or attached, so both must accept the same shapes. A keyed object maps the
-		// question to its answer (`{"Which colour?": "Blue"}`) — the shape `parseQuestionAnswer`
-		// already handles for an owned session. Stringifying it first produced "[object Object]",
-		// which matched no option, so the wearer's answer was silently dropped.
-		const keyed = rawAnswer && typeof rawAnswer === "object" && !Array.isArray(rawAnswer) ? rawAnswer : null;
-		const value = keyed ? (keyed[dialog.prompt] ?? keyed[String(0)]) : rawAnswer;
-		// A dictated answer names an option by label ("Blue") or by number
-		// ("two" → 2), relative to the option rows as rendered.
-		const text = String(value ?? "").trim();
 		const options = dialog.options ?? [];
-		const wanted = resolveRequestedIndex(text, options);
-		if (wanted < 0) return false;
+		// The app names an answer three ways and cannot know whether this session is owned or
+		// attached, so both paths accept the same shapes. A keyed object maps the question to its
+		// answer, and `parseQuestionAnswer` looks the key up by question text, by question id, and
+		// by the question's index — `"0"` and `0` alike — with the value possibly an ARRAY for a
+		// multi-select. Handling only the prompt and `"0"` silently dropped the rest, and
+		// stringifying an array produced `"Green,Blue"`, which matches no label.
+		const keyed = rawAnswer && typeof rawAnswer === "object" && !Array.isArray(rawAnswer) ? rawAnswer : null;
+		const picks = keyed
+			? [keyed[dialog.prompt], keyed[dialog.toolName], keyed["0"], keyed[0]].find(hit => hit !== undefined && hit !== null)
+			: rawAnswer;
+		const values = (Array.isArray(picks) ? picks : [picks]).filter(item => item !== undefined && item !== null && item !== "");
+		if (values.length === 0) return false;
+		// An attached dialog can only be driven one row at a time, so every named option must be
+		// honoured — silently acting on the first would leave a multi-select half answered.
+		const wanted = [];
+		for (const value of values) {
+			// A dictated answer names an option by label ("Blue") or by number ("two" → 2),
+			// relative to the option rows as rendered.
+			const index = resolveRequestedIndex(String(value).trim(), options);
+			if (index < 0) return false;
+			if (!wanted.includes(index)) wanted.push(index);
+		}
 		if (dialog.multi) return this.#toggleMulti(dialog, wanted);
-		return this.#selectSingle(dialog, wanted);
+		return this.#selectSingle(dialog, wanted[0]);
 	}
 
 	/** Single-select: move the highlight to the row, then submit. */
@@ -570,15 +580,21 @@ export class AttachSession {
 	 * dialog submitted with `Enter`. The cursor returns to its start row so the
 	 * sequence is independent of any prior state.
 	 */
-	async #toggleMulti(dialog, wanted) {
-		let cursor = dialog.focusedIndex;
-		if (!(await this.#moveCursor(wanted - cursor))) return false;
-		cursor = wanted;
-		// `Space` toggles, so sending it to a row that is already checked would
-		// silently uncheck the desk user's selection.
-		const alreadyChecked = (dialog.checked ?? []).includes(wanted);
-		if (!alreadyChecked && !(await this.send("Space", { enter: false }))) return false;
-		if (cursor !== dialog.focusedIndex && !(await this.#moveCursor(dialog.focusedIndex - cursor))) return false;
+	async #toggleMulti(dialog, wantedRows) {
+		// `Space` toggles, so sending it to a row that is already checked would silently uncheck
+		// the desk user's selection; each named row is visited once and only unchecked ones are
+		// toggled.
+		for (const wanted of wantedRows) {
+			if (!(await this.#moveCursor(wanted - dialog.focusedIndex))) return false;
+			const alreadyChecked = (dialog.checked ?? []).includes(wanted);
+			if (!alreadyChecked && !(await this.send("Space", { enter: false }))) return false;
+		}
+		return this.#submitFrom(wantedRows[wantedRows.length - 1], dialog.focusedIndex);
+	}
+
+	/** Return the cursor to the row the desk had focused, then submit. */
+	async #submitFrom(row, homeRow) {
+		if (!(await this.#moveCursor(homeRow - row))) return false;
 		if (!(await this.send("Enter", { enter: false }))) return false;
 		return this.#answered();
 	}
@@ -1138,7 +1154,12 @@ function resolveRequestedIndex(text, options) {
 		one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
 		first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10,
 	};
-	const numericTokens = tokens.filter(token => /^\d+$/.test(token) || token in words);
+	// A digit ordinal (`2nd`, `3rd`) counts as its cardinal: left alone it matched neither the
+	// digit test nor the word map, so "the 2nd one" carried exactly one numeric token — the `one`
+	// — and submitted row 1, the same wrong-row failure the spelled ordinals had.
+	const numericTokens = tokens
+		.map(token => token.replace(/^(\d+)(?:st|nd|rd|th)$/, "$1"))
+		.filter(token => /^\d+$/.test(token) || token in words);
 	if (numericTokens.length === 1) {
 		const numeric = /^\d+$/.test(numericTokens[0]) ? Number(numericTokens[0]) : words[numericTokens[0]];
 		if (numeric >= 1 && numeric <= options.length) return numeric - 1;
