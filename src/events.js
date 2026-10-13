@@ -87,17 +87,21 @@ export function linkSessions(left, right) {
 	const leftWins = leftClass.messages.length > rightClass.messages.length ||
 		(leftClass.messages.length === rightClass.messages.length && leftClass.ids.size > rightClass.ids.size);
 	const [target, source] = leftWins ? [leftClass, rightClass] : [rightClass, leftClass];
-	// Both sides can already hold frames (an emit before the link). Keep BOTH histories rather
+	// Both sides can already hold frames: an emit before the link. Keep BOTH histories rather
 	// than dropping one, renumbering the source onto the target's id space so the ids stay
-	// monotonic and unique across the merge. The merged order is each side's own emission
-	// order (target first), which is the best available: the entries carry no timestamp, and
-	// no current server path emits into both classes before linking them.
+	// monotonic and unique across the merge.
 	//
-	// A cursor minted on the source ring no longer names the same frame, so the first read
-	// after such a merge can re-deliver already-seen source frames. Today no server path emits
-	// into both classes before linking them, so the case does not arise; re-delivering is also
-	// the safe direction for the dark-window contract, since a repeat frame is idempotent for
-	// the lens while a skipped one is lost.
+	// The merged order is each side's OWN emission order, target first — NOT wall-clock order.
+	// Entries carry no timestamp, so a merge cannot interleave the two histories; when the
+	// source emitted first in real time, a reader sees its earliest frames last. This is
+	// reachable: adoption links a caller id onto a session that has already emitted
+	// (server.js:267, and the /api/messages re-link), and the caller's own ring may hold frames
+	// by then. It is left as-is deliberately. Ordering it by time would mean renumbering the
+	// TARGET's entries too, and the client being linked is precisely the one holding a cursor
+	// in that id space — so the reorder is traded against an outright skipped frame, which the
+	// dark-window contract cannot tolerate. A repeat frame is idempotent for the lens; a lost
+	// one is gone. A cursor minted on the source ring likewise re-delivers already-seen source
+	// frames on the first read after a merge — over-delivery, never a skip.
 	if (source.messages.length > 0) {
 		const base = target.nextId;
 		const merged = source.messages.map(entry => ({ id: entry.id + base - 1, message: entry.message }));
