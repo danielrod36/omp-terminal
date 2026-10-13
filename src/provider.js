@@ -44,8 +44,10 @@ function truncate(value, max) {
 }
 
 function summarizeTool(name, args) {
-	const formatter = TOOL_SUMMARY[name];
-	if (formatter) return formatter(args ?? {});
+	// Own key: a bare `TOOL_SUMMARY[name]` resolves inherited members for a tool omp reported as
+	// `toString`/`constructor`, and the summary would then read "[object Undefined]".
+	const formatter = Object.hasOwn(TOOL_SUMMARY, name) ? TOOL_SUMMARY[name] : undefined;
+	if (typeof formatter === "function") return formatter(args ?? {});
 	return name;
 }
 
