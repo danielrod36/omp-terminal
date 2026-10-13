@@ -72,18 +72,9 @@ console.log("sessions");
 	const response = await fetch(`${base}/api/sessions?limit=5`, { headers: auth });
 	const body = await response.json();
 	check("200 with session list", response.status === 200 && Array.isArray(body.sessions));
-	// `every` over an empty list is true, and under --no-omp nothing ever starts a session, so
-	// this verified no row shape at all in CI. Assert on a non-empty list when there is one, and
-	// say so when there is not.
-	if (body.sessions.length > 0) {
-		check(
-			"session shape",
-			body.sessions.every(s => s.id && s.provider === config.providerLabel && "status" in s),
-			JSON.stringify(body.sessions[0]),
-		);
-	} else {
-		console.log("  ~ session shape not asserted: no session is running under --no-omp");
-	}
+	// The row SHAPE is asserted below instead, after a session exists. Under --no-omp nothing
+	// ever starts one, and here the seeds are not written yet, so a check on this list could
+	// only ever be skipped — which is what it used to do, while claiming to verify the shape.
 }
 
 if (withOmp) {
@@ -101,6 +92,19 @@ if (withOmp) {
 	// then covers the frames emitted before the subscription attached.
 	const canonicalId = promptBody.sessionId;
 	check("prompt response names a session", Boolean(canonicalId));
+
+	// Assert the row shape HERE, where a session provably exists. The earlier /api/sessions
+	// block could only ever skip this under --no-omp (nothing starts a session) and ran before
+	// the seeds were written, so the shape had never actually been checked in CI.
+	{
+		const listed = await (await fetch(`${base}/api/sessions?limit=5`, { headers: auth })).json();
+		const row = (listed.sessions ?? []).find(session => session.id === canonicalId);
+		check(
+			"session row carries id, provider and status",
+			Boolean(row) && row.id === canonicalId && row.provider === config.providerLabel && "status" in row,
+			JSON.stringify(row ?? listed.sessions?.[0]),
+		);
+	}
 
 	const stream = await fetch(`${base}/api/events?sessionId=${canonicalId}&needReplay=true`, { headers: auth });
 	const reader = stream.body.getReader();
