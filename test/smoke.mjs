@@ -247,11 +247,15 @@ console.log("dialog answer result shape");
 		[["Approve", "Deny"], "deny", "Deny"],
 		[["Yes", "No"], "allow", "Yes"],
 		[["Yes", "No"], "deny", "No"],
+		// A blank row must not be replied verbatim: the announce drops it (so it shows the stock
+		// pair), and the reply has to agree with what was shown rather than send an empty string.
+		[["Approve", ""], "deny", "Deny"],
+		[["", "Deny"], "allow", "Approve"],
 	]) {
 		sent.length = 0;
 		ownedReplies.pendingDialogs.set("d", { method: "select", title: "Allow tool: b", options: offered });
 		await ownedReplies.answerPermission(decision);
-		check(`a permission reply names the offered row (${offered.join("/")} ${decision})`,
+		check(`a permission reply names the offered row (${JSON.stringify(offered)} ${decision})`,
 			sent[0]?.value === want,
 			JSON.stringify(sent[0]));
 	}

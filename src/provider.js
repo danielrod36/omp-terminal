@@ -252,7 +252,7 @@ export class OwnedSession {
 			// pair. Only an EXACT two-row offer is mirrored: for any other count the reply's
 			// `"Approve"`/`"Deny"` would not match what was offered, so the stock pair is safer than
 			// announcing the second of three options as the deny row.
-			const offered = Array.isArray(frame.options) ? frame.options.map(String).filter(Boolean) : [];
+			const offered = offeredRows(frame);
 			emit(
 				this.id,
 				permissionRequestFrame(this.id, {
@@ -354,7 +354,7 @@ export class OwnedSession {
 			// Reply with the row omp OFFERED, not a hardcoded pair: the announce mirrors
 			// `frame.options`, so replying with words the card did not present is a different answer
 			// than the one announced (and omp matches the value against the options it sent).
-			const offered = Array.isArray(frame.options) ? frame.options.map(String) : [];
+			const offered = offeredRows(frame);
 			const fallback = approved ? "Approve" : "Deny";
 			const value = offered.length === 2 ? offered[approved ? 0 : 1] : fallback;
 			this.rpc.respond(id, { value });
@@ -472,6 +472,18 @@ function normalizeAnswer(value, question) {
 	// rejected outright, so the field is omitted unless there is free text.
 	if (custom.length === 0) return { selectedOptions };
 	return { selectedOptions, customInput: custom.join(" ") };
+}
+
+/**
+ * The offered rows of an approve/deny `select`, as label strings.
+ *
+ * One helper because the ANNOUNCE and the REPLY must agree: the reply names a row by the same
+ * index the announce showed the wearer, so a different normalization on either side (an extra
+ * filter, say) announces one pair and answers with another. Empty rows are dropped here rather
+ * than at one call site, so both see the same length and the same order.
+ */
+function offeredRows(frame) {
+	return Array.isArray(frame.options) ? frame.options.map(String).filter(label => label.length > 0) : [];
 }
 
 /** Match a dictated string to an offered option: label, 1-based index, or case. */

@@ -223,20 +223,30 @@ console.log("pane scraping");
 				id: id3, tmuxSession: "props", cwd: "/tmp", provider: "p",
 				config: { sessionsRoot: "/tmp", tailIntervalMs: 500 }, transcriptPath: null,
 			});
-			session3.capture = async () => [
-				"╭─ Allow tool: bash ───────────╮",
-				"│ Command: x                   │",
-				"│  \uf054 Approve                  │",
-				"│ ↑/↓ navigate select cancel   │",
-				"╰──────────────────────────────╯",
-			].join("\n");
+			// A capture-call marker, not a sleep: both assertions here are absence-flavoured, so a
+			// late poll tick would pass them without the one-row guard being exercised at all. The
+			// poll reaching `capture` twice proves it ran and processed this pane.
+			let captures = 0;
+			let sawScrape;
+			const scraped = new Promise(resolve => { sawScrape = resolve; });
+			session3.capture = async () => {
+				captures += 1;
+				if (captures >= 2) sawScrape();
+				return [
+					"╭─ Allow tool: bash ───────────╮",
+					"│ Command: x                   │",
+					"│  \uf054 Approve                  │",
+					"│ ↑/↓ navigate select cancel   │",
+					"╰──────────────────────────────╯",
+				].join("\n");
+			};
 			session3.send = async () => true;
 			await session3.start();
-			await new Promise(resolve => setTimeout(resolve, 700));
+			await Promise.race([scraped, new Promise(resolve => setTimeout(resolve, 3000))]);
 			session3.timer && clearInterval(session3.timer);
 			check("a one-row partial card neither announces nor reports awaiting",
-				!announced3.some(frame => frame.type === "permission_request") && session3.state === "idle",
-				JSON.stringify({ types: announced3.map(f => f.type), state: session3.state }));
+				captures >= 2 && !announced3.some(frame => frame.type === "permission_request") && session3.state === "idle",
+				JSON.stringify({ captures, types: announced3.map(f => f.type), state: session3.state }));
 			fake3[DISPOSE]?.();
 			dropSession(id3);
 		}
